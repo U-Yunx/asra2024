@@ -694,7 +694,9 @@ export class MtBrokerAdapter implements BrokerAdapter {
       req.stopPips,
       Math.max(0, req.takeProfitPips),
     )
-    const units = Math.max(1, Math.round(req.units))
+    // Micro accounts: MetaTrader venues reject orders under 0.01 lots (1,000
+    // units), so never send a dust order — floor the size at one micro lot.
+    const units = Math.max(1_000, Math.round(req.units))
 
     const token = await robotTokenFor('mt')
     const { data, error: fnErr } = await this.api('open-position', {

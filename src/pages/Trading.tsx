@@ -251,6 +251,16 @@ const DURATION_OPTIONS: { label: string; value: number | null }[] = [
   { label: '24 hours', value: 1440 },
 ]
 
+/** Quick-start account sizes — micro accounts from $10 up to the standard $10k. */
+const SEED_PRESETS: { label: string; value: number }[] = [
+  { label: 'Micro $10', value: 10 },
+  { label: 'Mini $25', value: 25 },
+  { label: '$50', value: 50 },
+  { label: '$100', value: 100 },
+  { label: '$1k', value: 1000 },
+  { label: 'Standard $10k', value: 10_000 },
+]
+
 function fmtCountdown(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60)
   const s = totalSeconds % 60
@@ -561,11 +571,27 @@ export function Trading() {
             stopPips,
             pipValue,
           })
-          if (units <= 0) continue
+          if (units <= 0) {
+            setRobotLog((prev) =>
+              [
+                `Skipped ${target.symbol}: position size rounds to zero on this account — lower the stop or raise risk per trade.`,
+                ...prev,
+              ].slice(0, 8),
+            )
+            continue
+          }
 
           // Manual tune scales position size relative to the risk-based default.
           const scaledUnits = Math.round(units * tune.sizeMultiplier)
-          if (scaledUnits <= 0) continue
+          if (scaledUnits <= 0) {
+            setRobotLog((prev) =>
+              [
+                `Skipped ${target.symbol}: manual tune scaled the position size to zero — raise the size multiplier.`,
+                ...prev,
+              ].slice(0, 8),
+            )
+            continue
+          }
 
           const label = `${STRATEGY_META[target.best.type].shortLabel} · ${intervalLabel(interval)}`
           cycleInputs.push({
@@ -1411,17 +1437,38 @@ export function Trading() {
                 <p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">
                   {mode === 'managed'
                     ? 'Open a money-style live ledger on the platform — real-size positions, no external broker and no MetaApi token needed. The robot sizes every position from your risk settings, always sets a stop-loss, and records everything in your journal.'
-                    : 'Trade with simulated money. The robot sizes every position from your risk settings, always sets a stop-loss, and records everything in your journal. No sign-in required — sign in to back it up to your account and unlock the auto-trading robot.'}
+                    : 'Trade with simulated money — micro accounts work from $10. The robot sizes every position from your risk settings, always sets a stop-loss, and records everything in your journal. No sign-in required — sign in to back it up to your account and unlock the auto-trading robot.'}
                 </p>
               </div>
               <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-end">
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Quick start</span>
+                  <div className="flex flex-wrap gap-1.5" role="group" aria-label="Quick starting balance">
+                    {SEED_PRESETS.map((p) => (
+                      <button
+                        key={p.value}
+                        type="button"
+                        aria-pressed={seed === p.value}
+                        onClick={() => setSeed(p.value)}
+                        className={cn(
+                          'cursor-pointer rounded border px-2 py-1 text-xs font-medium transition-colors duration-150',
+                          seed === p.value
+                            ? 'border-accent/50 bg-accent/15 text-accent'
+                            : 'border-border bg-secondary/40 text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <Input
                   label="Starting balance (USD)"
                   type="number"
-                  min={100}
-                  step={100}
+                  min={10}
+                  step={10}
                   value={seed}
-                  onChange={(e) => setSeed(Math.max(100, Number(e.target.value) || 100))}
+                  onChange={(e) => setSeed(Math.max(10, Number(e.target.value) || 10))}
                 />
                 <Button
                   onClick={() => {

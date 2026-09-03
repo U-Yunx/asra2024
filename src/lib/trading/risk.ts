@@ -101,5 +101,12 @@ export function suggestPositionUnits(input: {
 }): number {
   if (input.equity <= 0 || input.stopPips <= 0 || input.pipValue <= 0) return 0
   const riskAmount = (input.equity * input.riskPct) / 100
-  return Math.floor(riskAmount / (input.stopPips * input.pipValue))
+  if (riskAmount <= 0) return 0
+  const costPerUnit = input.stopPips * input.pipValue
+  const units = Math.floor(riskAmount / costPerUnit)
+  // Micro-account floor: a positive risk budget must never round down to a
+  // zero-size order — the robot would silently skip every pair on a small
+  // balance. One unit risks only `costPerUnit` (≈ $0.002 on EUR/USD with a
+  // 20-pip stop), which any fundable micro account covers comfortably.
+  return Math.max(1, units)
 }
