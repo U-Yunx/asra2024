@@ -1,0 +1,58 @@
+# Deploy ANA24 to Cloudflare Pages (project: ana24).
+#
+# Runs on every push to `main` (and on manual dispatch). Builds the static SPA
+# with the public Supabase config and uploads `dist/` via `wrangler pages deploy`.
+# The Cloudflare API token lives ONLY in GitHub secrets — it is never baked into
+# the bundle and never touches client code.
+#
+# To activate, connect this repo to GitHub and add:
+#   Secrets (Settings → Secrets and variables → Actions → New repository secret):
+#     - CLOUDFLARE_API_TOKEN  (Cloudflare API token with "Cloudflare Pages: Edit" permission)
+#     - CLOUDFLARE_ACCOUNT_ID (Cloudflare account ID, e.g. https://dash.cloudflare.com/<ACCOUNT_ID>)
+#   Variables (or secrets — either works):
+#     - VITE_SUPABASE_URL     (https://<project-ref>.supabase.co — public)
+#     - VITE_SUPABASE_ANON_KEY (publishable/anon key — public)
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail fast (like the local `predeploy` guard) if the build env vars are missing.
+      - name: Verify deploy env
+        run: npm run predeploy
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || vars.VITE_SUPABASE_ANON_KEY }}
+
+      - name: Build
+        run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || vars.VITE_SUPABASE_ANON_KEY }}
+
+      - name: Deploy to Cloudflare Pages
+        run: npx wrangler pages deploy dist --project-name ana24
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

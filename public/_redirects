@@ -1,0 +1,3 @@
+# SPA fallback — every unknown route serves index.html so client-side routing
+# works on /trading, /admin, /profile, etc.
+/*  /index.html  200

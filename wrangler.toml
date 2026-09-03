@@ -1,0 +1,11 @@
+# Cloudflare Pages configuration for ANA24.
+#
+# The GitHub Actions workflow (.github/workflows/deploy-cloudflare.yml) runs
+# `wrangler pages deploy` on every push to `main`, using the build output
+# directory below. The same config lets you deploy locally:
+#
+#   npx wrangler pages deploy
+
+name = "ana24"
+compatibility_date = "2025-06-01"
+pages_build_output_dir = "dist"

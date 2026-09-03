@@ -1,0 +1,5 @@
+// Rehydration test artifact for src/lib/cn.ts.
+//
+// This file is intentionally NOT part of the build — it exists so the
+// corruption guard can verify the rehydration pipeline round-trips UTF-8
+// content without loss. It is safe to delete.

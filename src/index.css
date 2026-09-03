@@ -1,0 +1,154 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import 'tailwindcss';
+
+/*
+ * ANA24 — dark trading-terminal theme.
+ * Deep navy/ink backgrounds, cyan/teal accents, green/red for profit/loss,
+ * monospace tabular numerals for prices.
+ */
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-heading: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-background: oklch(0.178 0.035 264);
+  --color-foreground: oklch(0.96 0.008 240);
+  --color-muted: oklch(0.26 0.04 264);
+  --color-muted-foreground: oklch(0.68 0.03 250);
+  --color-secondary: oklch(0.24 0.042 264);
+  --color-border: oklch(0.32 0.045 260);
+  --color-accent: oklch(0.8 0.14 200);
+  --color-primary: oklch(0.8 0.14 200);
+  --color-on-primary: oklch(0.19 0.04 264);
+  --color-up: oklch(0.76 0.17 150);
+  --color-down: oklch(0.68 0.19 25);
+  --color-amber: oklch(0.8 0.15 80);
+  --color-destructive: oklch(0.65 0.21 25);
+  --color-ring: oklch(0.8 0.14 200);
+
+  /* Gradient stops for the landing feature cards. */
+  --color-trading: oklch(0.8 0.14 200);
+  --color-run: oklch(0.78 0.12 175);
+  --color-tune: oklch(0.72 0.16 300);
+  --color-trade: oklch(0.72 0.14 230);
+  --color-pick: oklch(0.8 0.15 80);
+
+  --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+  --animate-price-flash-up: price-flash-up 600ms ease-out;
+  --animate-price-flash-down: price-flash-down 600ms ease-out;
+  --animate-fade-up: fade-up 400ms ease-out both;
+  --animate-ticker: ticker 40s linear infinite;
+
+  @keyframes ticker {
+    0% {
+      transform: translateX(0);
+    }
+    100% {
+      transform: translateX(-50%);
+    }
+  }
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+      box-shadow: 0 0 0 0 oklch(0.76 0.17 150 / 45%);
+    }
+    50% {
+      opacity: 0.7;
+      box-shadow: 0 0 0 4px oklch(0.76 0.17 150 / 0%);
+    }
+  }
+  @keyframes price-flash-up {
+    0% {
+      background-color: oklch(0.76 0.17 150 / 25%);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+  @keyframes price-flash-down {
+    0% {
+      background-color: oklch(0.68 0.19 25 / 25%);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+  @keyframes fade-up {
+    0% {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Tabular numerals for prices and stats. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Terminal grid backdrop used by the setup screen and auth page. */
+.bg-terminal-grid {
+  background-image:
+    radial-gradient(oklch(0.41 0.1 250 / 5%) 1px, transparent 1px),
+    linear-gradient(oklch(0.41 0.1 250 / 6%), oklch(0.41 0.1 250 / 6%));
+  background-size:
+    22px 22px,
+    100% 1px;
+}
+
+.bg-dotgrid-glow {
+  background-color: oklch(0.1638 0 0);
+  background-image:
+    radial-gradient(
+      circle at 50% 118%,
+      oklch(0.41 0.14 250 / 45%) 0%,
+      oklch(0.41 0.14 250 / 22%) 22%,
+      oklch(0.41 0.14 250 / 10%) 32%,
+      oklch(0.41 0.14 250 / 4%) 38%,
+      transparent 45%
+    ),
+    radial-gradient(oklch(0.41 0.14 250 / 4%) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    16px 16px;
+  background-position: center, center;
+}
+
+/* Smooth 150ms hover/active transitions on interactive elements. */
+button,
+a,
+select,
+input {
+  transition:
+    color 150ms ease-out,
+    background-color 150ms ease-out,
+    border-color 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

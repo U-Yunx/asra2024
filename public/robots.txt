@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+
+Disallow: /admin
+Disallow: /configuration
+Disallow: /account
+Disallow: /profile
+Disallow: /notifications
+
+Sitemap: /sitemap.xml
