@@ -425,8 +425,21 @@ export interface NotificationRow {
 /** Robot trading style: scalping (fast, tight stops) vs long-term (slow, wide). */
 export type TradingMethod = 'scalping' | 'longterm'
 
+/**
+ * How the robot picks the trading method (strategy) per pair:
+ *   - 'auto'   — evaluates ALL strategies (MA, RSI, MACD, Bollinger) on every
+ *                pair and applies the one with the highest probability of
+ *                profit (best method for higher profit / less loss).
+ *   - 'manual' — uses only the user-selected strategy (`manualStrategy`).
+ */
+export type StrategyMode = 'auto' | 'manual'
+
 export interface RobotPrefs {
   method: TradingMethod
+  /** How the robot picks the strategy per pair: 'auto' = best of all, 'manual' = the one chosen below. */
+  strategyMode: StrategyMode
+  /** The strategy the robot uses when strategyMode is 'manual'. */
+  manualStrategy: StrategyType
   durationMinutes: number | null
   /** Watchlist pairs the robot should trade simultaneously (multi-pair). */
   pairs: string[]

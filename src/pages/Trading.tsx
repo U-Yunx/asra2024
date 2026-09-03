@@ -7,6 +7,7 @@ import { useRobotRecorder } from '../lib/trading/useRobotRecorder'
 import { autoTune } from '../lib/trading/autoTune'
 import { aggressivenessLabel, useManualTune } from '../lib/trading/manualTune'
 import { rankPairs, type RankedPair } from '../lib/trading/pairRanking'
+import { manualTargets } from '../lib/trading/manualMethod'
 import { fetchTimeSeries, useQuotes } from '../hooks/useMarketData'
 import { useSelectedStrategy } from '../hooks/useSelectedStrategy'
 import { useAuth } from '../hooks/useAuth'
@@ -14,10 +15,10 @@ import { useAccess, useBrokers, useProfile, useSubscriptions } from '../hooks/us
 import { acceptRisk } from '../lib/platform'
 import { pipValueUsd, stopDistanceFromAtr, suggestPositionUnits } from '../lib/trading/risk'
 import { equity } from '../lib/trading/engine'
-import { INTERVALS, STRATEGY_META, intervalLabel } from '../lib/strategies'
+import { INTERVALS, STRATEGY_META, STRATEGY_TYPES, intervalLabel } from '../lib/strategies'
 import { WATCHLIST } from '../lib/watchlist'
 import { fn as invokeEdge } from '../lib/functions'
-import type { Bar, BrokerConnectionRow, Interval, StrategyConfig, TradingMethod, TunedResult } from '../lib/types'
+import type { Bar, BrokerConnectionRow, Interval, StrategyConfig, StrategyType, TradingMethod, TunedResult } from '../lib/types'
 import type { BrokerMode, RatesMap, AccountState, RobotConfig, RobotCycleInput } from '../lib/trading/types'
 import { timeAgo, formatUsd } from '../lib/format'
 import { cn } from '../lib/cn'
@@ -279,6 +280,8 @@ export function Trading() {
   const {
     prefs,
     setMethod,
+    setStrategyMode,
+    setManualStrategy,
     setDuration,
     setPairs,
     togglePair,
@@ -504,9 +507,18 @@ export function Trading() {
         )
         if (cancelled) return
 
-        // Score + rank every pair. Auto-pick keeps only the top-ranked few.
+        // Score + rank every pair. Auto mode evaluates ALL strategies per pair
+        // and applies the strongest setup (best method = higher profit / less
+        // loss). Manual mode uses ONLY the user-selected strategy — the robot
+        // still scores pairs by that strategy's signal strength and trades the
+        // strongest ones first.
         const ranked = rankPairs(barsBySymbol, interval)
-        const targets: RankedPair[] = prefs.autoPickPairs ? ranked.slice(0, prefs.pairCount) : ranked
+        const targets: RankedPair[] =
+          prefs.strategyMode === 'manual'
+            ? manualTargets(barsBySymbol, prefs.manualStrategy, interval)
+            : prefs.autoPickPairs
+              ? ranked.slice(0, prefs.pairCount)
+              : ranked
         if (prefs.autoPickPairs && targets.length > 0) {
           setRobotLog((prev) =>
             [
@@ -592,6 +604,8 @@ export function Trading() {
     autoTrade,
     robotPairs,
     prefs.method,
+    prefs.strategyMode,
+    prefs.manualStrategy,
     prefs.autoPickPairs,
     prefs.pairCount,
     prefs.perTradeStopLossPips,
@@ -761,7 +775,9 @@ export function Trading() {
               </p>
               <p className="mt-0.5 text-sm text-muted-foreground">
                 {autoTrade
-                  ? `Scanning ${robotPairs.length} pair${robotPairs.length === 1 ? '' : 's'} · every strategy evaluated on each · one position per pair, strongest setup first.`
+                  ? prefs.strategyMode === 'manual'
+                    ? `Scanning ${robotPairs.length} pair${robotPairs.length === 1 ? '' : 's'} · ${STRATEGY_META[prefs.manualStrategy].shortLabel} method only, strongest signals first.`
+                    : `Scanning ${robotPairs.length} pair${robotPairs.length === 1 ? '' : 's'} · every strategy evaluated on each · one position per pair, strongest setup first.`
                   : 'Start the robot to auto-trade the strongest signal across your selected pairs — always risk-sized with a stop-loss.'}
               </p>
             </div>
@@ -954,9 +970,71 @@ export function Trading() {
               })}
             </div>
             <p className="mt-1.5 text-xs text-muted-foreground">
-              The robot picks the best strategy for each pair automatically and holds one position per pair. Add pairs
-              to spread its attention, or remove them to focus it.
+              The robot trades one position per pair. In Auto method it picks the best strategy for each pair
+              automatically; in Manual method it uses only the strategy you choose below. Add pairs to spread its
+              attention, or remove them to focus it.
             </p>
+          </div>
+
+          {/* Trading method: auto (best of all strategies) vs manual (one strategy) */}
+          <div className="rounded-xl border border-border bg-secondary/30 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-foreground">Trading method</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {prefs.strategyMode === 'auto'
+                    ? 'Auto — the robot evaluates MA, RSI, MACD and Bollinger on every pair and applies the best one, for higher profit and less loss.'
+                    : `Manual — the robot uses only ${STRATEGY_META[prefs.manualStrategy].name}.`}
+                </p>
+              </div>
+              <div
+                className="inline-flex items-center gap-1 rounded-lg border border-border bg-secondary/40 p-1"
+                role="group"
+                aria-label="Trading method"
+              >
+                <button
+                  type="button"
+                  onClick={() => setStrategyMode('auto')}
+                  aria-pressed={prefs.strategyMode === 'auto'}
+                  className={cn(
+                    'h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors duration-150',
+                    prefs.strategyMode === 'auto' ? 'bg-accent text-black' : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  Auto (best method)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStrategyMode('manual')}
+                  aria-pressed={prefs.strategyMode === 'manual'}
+                  className={cn(
+                    'h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors duration-150',
+                    prefs.strategyMode === 'manual' ? 'bg-accent text-black' : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  Manual
+                </button>
+              </div>
+            </div>
+            {prefs.strategyMode === 'manual' && (
+              <div className="mt-3">
+                <Select
+                  label="Strategy to trade"
+                  value={prefs.manualStrategy}
+                  onChange={(e) => setManualStrategy(e.target.value as StrategyType)}
+                >
+                  {STRATEGY_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {STRATEGY_META[t].name}
+                    </option>
+                  ))}
+                </Select>
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  The robot evaluates this method on every selected pair and trades only the pairs where it has a live
+                  signal — strongest first, always stop-loss protected.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Best analysis method (auto-pick) — rank every pair, trade the top ones */}

@@ -10,12 +10,16 @@ import { corsHeaders } from "jsr:@supabase/supabase-js@2/cors";
 // caches responses so dashboard polling and repeated signals don't burn the
 // free-tier credit budget.
 //
-// v11 — multiple providers + automatic fallback + one-click free source:
-//   * A small provider registry (Twelve Data = default, Finnhub, Alpha Vantage,
+// v12 — keyless-first (Yahoo + Binance default) + one-click reconfigure:
+//   * A small provider registry (Twelve Data, Finnhub, Alpha Vantage,
 //     Polygon.io) plus a free keyless source (Binance public API for crypto +
 //     Yahoo Finance for FX) and a broker-derived source (OANDA — auto-generated
 //     from the admin's broker trader account on the Brokers page) lets an admin
 //     pick which provider feeds the platform.
+//   * The free keyless source is now the DEFAULT provider — quotes, charts and
+//     the robot work immediately with no API key and no signup. Keyed providers
+//     stay available for admins who want them, and the automatic fallback chain
+//     still promotes whichever provider actually serves data.
 //   * Any signed-in user can activate the free source from the Configuration
 //     page (`activate_free`) — no signup, no API key. It never overrides a
 //     provider that already has a stored key: the free source simply stays the
@@ -261,7 +265,8 @@ interface MarketProvider {
 
 let apiKeyCache: { provider: string; key: string; at: number } | null = null;
 
-/** Read the selected provider id from app_secrets (falls back to twelvedata). */
+/** Read the selected provider id from app_secrets (falls back to yahoo — the
+ * keyless free source, so the platform works with no API key out of the box). */
 async function resolveSelectedProvider(): Promise<string> {
   if (admin) {
     try {
@@ -276,7 +281,7 @@ async function resolveSelectedProvider(): Promise<string> {
       // fall through to default
     }
   }
-  return "twelvedata";
+  return "yahoo";
 }
 
 /**
@@ -378,6 +383,60 @@ async function configSummary(): Promise<Record<string, unknown>> {
     active_provider_label: active.label,
     fallback_available: chain.length > 1,
   };
+}
+
+/**
+ * One-click "reconfigure all API settings" (any signed-in user, from the
+ * Configuration page): GRAB the current provider config, FETCH a live quote to
+ * prove the grab/fetch/inject pipeline works end-to-end, and INJECT the free
+ * keyless source (Binance + Yahoo) as the active provider when no keyed
+ * provider is configured. Returns the fresh config summary so the UI reflects
+ * the new state immediately.
+ */
+async function handleReconfigure(): Promise<Response> {
+  if (!admin) return json({ error: "internal", message: "Market data service is not configured." }, 500);
+
+  // 1) GRAB — current provider config.
+  const before = await configSummary();
+
+  // 2) FETCH — prove the pipeline works with a live quote from the keyless
+  //    source. If the free feeds are unreachable the platform has nothing to
+  //    inject, so we surface that instead of silently switching.
+  try {
+    const q = await yahooQuote("", "EUR/USD");
+    if (q?.error || q?.price == null) {
+      return json({ error: "upstream", message: "The free feeds (Yahoo / Binance) are unreachable right now — reconfigure failed." }, 502);
+    }
+  } catch {
+    return json({ error: "upstream", message: "The free feeds (Yahoo / Binance) are unreachable right now — reconfigure failed." }, 502);
+  }
+
+  // 3) INJECT — make the free keyless source the active provider unless a
+  //    keyed provider is already configured (never silently override a key).
+  let injected = false;
+  for (const id of Object.keys(PROVIDERS)) {
+    const p = PROVIDERS[id];
+    if (p.keyless) continue;
+    if (await resolveApiKey(id)) {
+      return json({
+        ok: true,
+        message: `Config verified — quotes are live. Your keyed provider (${p.label}) stays the main source; the free feed remains its automatic fallback.`,
+        fetched: 1,
+        ...(await configSummary()),
+      });
+    }
+  }
+  await admin.from("app_secrets").upsert({ key: "market_data_provider", value: "yahoo" }, { onConflict: "key" });
+  apiKeyCache = null;
+  injected = true;
+  void before; // captured for observability; the fresh summary is returned below
+  return json({
+    ok: true,
+    message: "API settings reconfigured in one click — free market data (Binance + Yahoo) is now the active source and quotes are live.",
+    fetched: 1,
+    injected,
+    ...(await configSummary()),
+  });
 }
 
 /** Report the selected provider, key state, keyless/broker flags, and active provider. */
@@ -1924,6 +1983,10 @@ Deno.serve(async (req: Request) => {
     if (body.action === "activate_free") {
       if (!(await hasSession(req))) return json({ error: "unauthorized" }, 401);
       return await handleActivateFree();
+    }
+    if (body.action === "reconfigure") {
+      if (!(await hasSession(req))) return json({ error: "unauthorized" }, 401);
+      return await handleReconfigure();
     }
 
     // Admin-only actions: change a provider key, disconnect a provider, or

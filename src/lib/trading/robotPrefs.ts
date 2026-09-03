@@ -3,12 +3,14 @@
  * from a style to sensible interval + risk defaults. Persisted to localStorage.
  */
 import { useCallback, useState } from 'react'
-import type { Interval, RobotPrefs, TradingMethod } from '../types'
+import type { Interval, RobotPrefs, StrategyMode, StrategyType, TradingMethod } from '../types'
 import type { RiskConfig } from './types'
 
 const KEY = 'ana24.robot-prefs'
 const DEFAULTS: RobotPrefs = {
   method: 'scalping',
+  strategyMode: 'auto',
+  manualStrategy: 'MA',
   durationMinutes: null,
   pairs: [],
   autoPickPairs: false,
@@ -26,6 +28,13 @@ function num(v: unknown, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback
 }
 
+const STRATEGY_TYPES_SET: ReadonlySet<string> = new Set(['MA', 'RSI', 'MACD', 'BOLLINGER'])
+
+/** True when the value is one of the supported strategy types. */
+export function isStrategyType(v: unknown): v is StrategyType {
+  return typeof v === 'string' && STRATEGY_TYPES_SET.has(v)
+}
+
 export function loadRobotPrefs(): RobotPrefs {
   try {
     const raw = localStorage.getItem(KEY)
@@ -33,6 +42,8 @@ export function loadRobotPrefs(): RobotPrefs {
     const p = JSON.parse(raw) as Partial<RobotPrefs>
     return {
       method: p.method === 'longterm' ? 'longterm' : 'scalping',
+      strategyMode: p.strategyMode === 'manual' ? 'manual' : 'auto',
+      manualStrategy: isStrategyType(p.manualStrategy) ? p.manualStrategy : 'MA',
       durationMinutes: typeof p.durationMinutes === 'number' ? p.durationMinutes : null,
       pairs: Array.isArray(p.pairs) ? p.pairs : [],
       autoPickPairs: p.autoPickPairs === true,
@@ -67,6 +78,8 @@ export function useRobotPrefs() {
   return {
     prefs,
     setMethod: (m: TradingMethod) => update({ method: m }),
+    setStrategyMode: (strategyMode: StrategyMode) => update({ strategyMode }),
+    setManualStrategy: (manualStrategy: StrategyType) => update({ manualStrategy }),
     setDuration: (minutes: number | null) => update({ durationMinutes: minutes }),
     setPairs: (pairs: string[]) => update({ pairs }),
     togglePair: (symbol: string) => update({ pairs: toggleInList(prefs.pairs, symbol) }),

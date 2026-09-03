@@ -6,20 +6,23 @@
  * key.
  */
 import { useCallback, useEffect, useState } from 'react'
-import { RefreshCw, Save, SlidersHorizontal, Layers, ShieldCheck, Zap } from 'lucide-react'
+import { RefreshCw, Save, SlidersHorizontal, Layers, ShieldCheck, Zap, Wrench, ListChecks } from 'lucide-react'
 import { useRobotPrefs, methodLabel } from '../lib/trading/robotPrefs'
 import { WATCHLIST, isCryptoPair } from '../lib/watchlist'
-import { activateFreeMarketData, fetchMarketDataConfig } from '../lib/platform'
+import { activateFreeMarketData, fetchMarketDataConfig, reconfigureMarketData } from '../lib/platform'
 import type { MarketDataConfig } from '../lib/platform'
-import type { TradingMethod } from '../lib/types'
+import type { StrategyType, TradingMethod } from '../lib/types'
 import type { TradeMode } from '../lib/trading/types'
+import { STRATEGY_META, STRATEGY_TYPES } from '../lib/strategies'
 import { cn } from '../lib/cn'
-import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, PageHeader } from '../components/ui'
+import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, PageHeader, Select } from '../components/ui'
 
 export function Configuration() {
   const {
     prefs,
     setMethod,
+    setStrategyMode,
+    setManualStrategy,
     setPairs,
     togglePair,
     setAutoPickPairs,
@@ -85,6 +88,59 @@ export function Configuration() {
                 ? 'Fast entries with tight stops and targets — suits 5-minute charts.'
                 : 'Slower, wider-stopped trades that hold for larger moves — suits hourly charts.'}
             </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <ListChecks className="h-4 w-4 text-accent" aria-hidden="true" />
+              Trading method
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-2" role="group" aria-label="Trading method">
+              {(['auto', 'manual'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setStrategyMode(m)}
+                  aria-pressed={prefs.strategyMode === m}
+                  className={cn(
+                    'cursor-pointer rounded-lg border px-3 py-2.5 text-left text-sm font-semibold',
+                    prefs.strategyMode === m
+                      ? 'border-accent bg-accent/15 text-accent'
+                      : 'border-border bg-secondary text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {m === 'auto' ? 'Auto (best method)' : 'Manual'}
+                  <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
+                    {m === 'auto'
+                      ? 'Robot evaluates MA, RSI, MACD & Bollinger on every pair and applies the best one — higher profit, less loss.'
+                      : 'Robot uses only the strategy you choose below.'}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {prefs.strategyMode === 'manual' && (
+              <div className="mt-3">
+                <Select
+                  label="Strategy to trade"
+                  value={prefs.manualStrategy}
+                  onChange={(e) => setManualStrategy(e.target.value as StrategyType)}
+                >
+                  {STRATEGY_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {STRATEGY_META[t].name}
+                    </option>
+                  ))}
+                </Select>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  The robot trades only the pairs where this strategy has a live signal — strongest first, always
+                  stop-loss protected.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -308,6 +364,7 @@ function MarketDataCard() {
   const [cfg, setCfg] = useState<MarketDataConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [activating, setActivating] = useState(false)
+  const [reconfiguring, setReconfiguring] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
@@ -338,6 +395,27 @@ function MarketDataCard() {
     }
     if (res.config) setCfg(res.config)
     setMsg(res.message ?? 'Free market data is now the main source — quotes, charts and the robot use it automatically.')
+  }
+
+  /**
+   * One-click "reconfigure all API settings" (grab → fetch → inject). GRABs the
+   * current provider config, FETCHes a live quote to prove the pipeline works,
+   * and INJECTs the free keyless source as the active provider when no keyed
+   * provider is configured. Single button, single round-trip.
+   */
+  const reconfigure = async () => {
+    setReconfiguring(true)
+    setErr(null)
+    setMsg(null)
+    const res = await reconfigureMarketData()
+    setReconfiguring(false)
+    if (res.error) {
+      setErr(res.error)
+      if (res.config) setCfg(res.config)
+      return
+    }
+    if (res.config) setCfg(res.config)
+    setMsg(res.message ?? 'API settings reconfigured — quotes are live.')
   }
 
   return (
@@ -385,23 +463,29 @@ function MarketDataCard() {
               </p>
             </div>
             <div className="shrink-0">
-              {freeActive ? (
-                <button
-                  type="button"
-                  onClick={() => void load()}
-                  className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-secondary/40 px-4 py-2 text-sm font-medium text-muted-foreground transition-colors duration-150 hover:text-foreground active:scale-[0.97]"
-                >
-                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
-                  Check status
-                </button>
-              ) : keyedActive ? (
-                <Badge className="border-border bg-muted text-muted-foreground">Free fallback ready</Badge>
-              ) : (
-                <Button onClick={() => void activate()} loading={activating}>
-                  <Zap className="h-4 w-4" aria-hidden="true" />
-                  Get free market data
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="secondary" size="sm" onClick={() => void reconfigure()} loading={reconfiguring}>
+                  <Wrench className="h-4 w-4" aria-hidden="true" />
+                  Reconfigure API settings
                 </Button>
-              )}
+                {freeActive ? (
+                  <button
+                    type="button"
+                    onClick={() => void load()}
+                    className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-secondary/40 px-4 py-2 text-sm font-medium text-muted-foreground transition-colors duration-150 hover:text-foreground active:scale-[0.97]"
+                  >
+                    <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                    Check status
+                  </button>
+                ) : keyedActive ? (
+                  <Badge className="border-border bg-muted text-muted-foreground">Free fallback ready</Badge>
+                ) : (
+                  <Button onClick={() => void activate()} loading={activating}>
+                    <Zap className="h-4 w-4" aria-hidden="true" />
+                    Get free market data
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         )}

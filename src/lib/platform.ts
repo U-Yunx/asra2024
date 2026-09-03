@@ -665,8 +665,8 @@ function normalizeMarketDataConfig(data: unknown): MarketDataConfig | null {
   if (!data || typeof data !== 'object' || 'error' in (data as object)) return null
   const cfg = data as Partial<MarketDataConfig>
   return {
-    provider: cfg.provider ?? 'twelvedata',
-    provider_label: cfg.provider_label ?? 'Twelve Data',
+    provider: cfg.provider ?? 'yahoo',
+    provider_label: cfg.provider_label ?? 'Free market data',
     configured: Boolean(cfg.configured),
     providers: Array.isArray(cfg.providers) && cfg.providers.length > 0 ? cfg.providers : [],
     active_provider: cfg.active_provider ?? null,
@@ -680,6 +680,32 @@ export async function fetchMarketDataConfig(): Promise<MarketDataConfig | null> 
   const { data, error } = await supabase.functions.invoke('market-data', { body: { action: 'market_config' } })
   if (error) return null
   return normalizeMarketDataConfig(data)
+}
+
+/**
+ * One-click "reconfigure all API settings" (grab → fetch → inject), any
+ * signed-in user, from the Configuration page. GRAB the current provider
+ * config, FETCH a live quote to prove the pipeline works, INJECT the free
+ * keyless source (Binance + Yahoo) as the active provider when no keyed
+ * provider is configured. Returns the fresh config + message.
+ */
+export async function reconfigureMarketData(): Promise<{
+  error: string | null
+  message?: string
+  config: MarketDataConfig | null
+}> {
+  const { data, error } = await supabase.functions.invoke('market-data', { body: { action: 'reconfigure' } })
+  if (error) return { error: error.message ?? 'Could not reconfigure the API settings.', config: null }
+  if (data && typeof data === 'object' && 'error' in (data as object)) {
+    const msg = (data as { message?: string }).message
+    return { error: msg ?? 'Could not reconfigure the API settings.', config: null }
+  }
+  const payload = data as { message?: string } | null
+  return {
+    error: null,
+    message: typeof payload?.message === 'string' ? payload.message : undefined,
+    config: normalizeMarketDataConfig(data),
+  }
 }
 
 /**
