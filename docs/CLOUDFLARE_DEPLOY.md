@@ -3,35 +3,38 @@
 ANA24 deploys as a static SPA to Cloudflare Pages. All server-side work runs in
 Supabase Edge Functions, so the Pages site itself is just the built bundle.
 
-## Prerequisites
+## How deployment works
 
-- A Cloudflare account with the Pages project `ana24` created.
-- `wrangler` installed (it's a devDependency).
-- The two public env vars set for the build:
-  - `VITE_SUPABASE_URL`
-  - `VITE_SUPABASE_ANON_KEY`
+Deployment is **CI-only** via GitHub Actions (`.github/workflows/deploy-cloudflare.yml`):
 
-These are **public** values (URL + publishable/anon key). No real secrets are
-ever baked into the bundle.
-
-## Deploy
-
-```bash
-npm run predeploy   # checks required env vars are present
-npm run deploy      # npm run build && wrangler pages deploy dist --project-name ana24
+```
+push to main  →  npm ci → npm test → npm run deploy (env guard + corruption guard + build)
+              →  wrangler-action pages deploy ./dist --project-name ana24
 ```
 
-`scripts/check-deploy-env.mjs` exits non-zero if a required variable is
-missing, so a broken deploy never ships.
+- `npm run deploy` locally = `predeploy` (env guard + corruption guard) + `build`.
+  It does **not** push to Pages — the Pages upload happens in CI.
+- `wrangler` is **not** a project devDependency. CI uses
+  `cloudflare/wrangler-action@v4`, which brings its own wrangler. You don't need
+  to install wrangler locally.
+- `scripts/check-deploy-env.mjs` (runs inside `predeploy`) exits non-zero if a
+  required build variable is missing, so a broken deploy never ships.
 
-## CI/CD (GitHub Actions)
+## Prerequisites (one-time, done by the app owner)
 
-`.github/workflows/deploy.yml` automates the whole flow on every push to `main`:
-`npm ci` → `npm run predeploy` (env guard) → `npm run build` →
-`wrangler pages deploy dist --project-name ana24`.
+1. **Cloudflare account** with a Pages project named `ana24` created
+   (Cloudflare dashboard → Workers & Pages → Create → Pages → project name `ana24`).
+2. **Cloudflare API token** with the **Cloudflare Pages: Edit** permission
+   (dash.cloudflare.com → My Profile → API Tokens → Create Token → custom token,
+   scoped to your account with `Cloudflare Pages — Edit`).
+   Copy the **account ID** too — it's in the dashboard URL:
+   `https://dash.cloudflare.com/<ACCOUNT_ID>`.
+3. **GitHub repo** for this project (connect GitHub in native.builder
+   Settings → Integrations, then use the **Sync** button on the project).
 
-Before the first CI deploy, add to the GitHub repo
-(Settings → Secrets and variables → Actions):
+## Activating CI (one-time, done by the app owner)
+
+Add to the GitHub repo: **Settings → Secrets and variables → Actions**.
 
 | Scope | Name | Value |
 | --- | --- | --- |
@@ -41,7 +44,13 @@ Before the first CI deploy, add to the GitHub repo
 | Secret or variable | `VITE_SUPABASE_ANON_KEY` | Publishable/anon key — public |
 
 The Cloudflare token is a real secret and only ever exists in GitHub secrets /
-Cloudflare; it is never baked into the bundle.
+Cloudflare; it is never baked into the bundle. The two `VITE_*` values are
+**public** (URL + publishable/anon key) — they are baked into the static bundle
+at build time, which is safe.
+
+After the secrets are in place, push to `main` (or run the workflow manually via
+the **Actions** tab → *Deploy to Cloudflare Pages* → *Run workflow*). The site
+appears at `https://ana24.pages.dev` (or your custom domain).
 
 ## Routing
 
@@ -60,5 +69,9 @@ permissions policy). If you change the Supabase project ref, update the
 - **Supabase calls failing in prod but not locally** — confirm
   `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` are set for the Production
   environment (not just Preview).
+- **CI fails at "Verify deploy env"** — one of the four repo secrets/variables
+  above is missing from GitHub Settings → Secrets and variables → Actions.
+- **CI fails at the Pages step** — the Cloudflare token lacks `Cloudflare Pages:
+  Edit`, or the Pages project `ana24` hasn't been created yet.
 - **CSP blocking a call** — if you add a new provider origin, add it to the
   `connect-src` policy in `public/_headers`.

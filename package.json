@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite optimize && vite",
     "build": "vite build",
-    "predeploy": "node scripts/check-corruption.mjs",
+    "predeploy": "node scripts/check-deploy-env.mjs && node scripts/check-corruption.mjs",
     "deploy": "npm run predeploy && npm run build",
     "preview": "vite preview",
     "test": "vitest run"
