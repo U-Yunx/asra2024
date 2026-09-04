@@ -15,7 +15,7 @@ import type {
   Side,
 } from './types'
 import { DEFAULT_RISK } from './types'
-import { pnlUsd, pipSize, stopTakePrices } from './risk'
+import { consecutiveLosses, pnlUsd, pipSize, stopTakePrices } from './risk'
 
 export function createAccount(initialBalance: number, id: string | null = null): AccountState {
   return {
@@ -263,6 +263,19 @@ export function todayPnlUsd(state: AccountState, rates: RatesMap): number {
 
 /** Safety gate: block new entries when the daily loss limit is reached. */
 export function canOpen(state: AccountState, rates: RatesMap): { ok: boolean; reason?: string } {
+  // Consecutive-loss circuit breaker: after N losses in a row the robot stands
+  // down until the streak is broken (a win) or the limit is raised. Off by
+  // default (maxConsecutiveLosses = 0); presets turn it on.
+  const maxLosses = state.risk.maxConsecutiveLosses
+  if (maxLosses > 0) {
+    const streak = consecutiveLosses(state.trades)
+    if (streak >= maxLosses) {
+      return {
+        ok: false,
+        reason: `${streak} losses in a row — the robot is standing down. Raise the consecutive-loss limit or let a win reset the streak.`,
+      }
+    }
+  }
   const limitPct = state.risk.maxDailyLossPct
   if (limitPct > 0) {
     const limitUsd = (state.initialBalance * limitPct) / 100

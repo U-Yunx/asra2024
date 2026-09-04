@@ -1,11 +1,13 @@
 /**
  * ManualTunePanel — the one-click tuning card. Five aggressiveness presets
- * (conservative → extreme) map onto risk + sizing knobs; individual fields can
- * be fine-tuned below. "Apply" pushes the profile onto the live risk config.
+ * (conservative → extreme) map onto risk + sizing knobs and risk guardrails
+ * (adaptive risk, volatility filter, consecutive-loss breaker); individual
+ * fields can be fine-tuned below. "Apply" pushes the profile onto the live
+ * risk config.
  */
-import { Check, RotateCcw, Sliders, Sparkles } from 'lucide-react'
+import { Check, RotateCcw, ShieldCheck, Sliders, Sparkles } from 'lucide-react'
 import type { Aggressiveness, ManualTune } from '../../lib/trading/manualTune'
-import { aggressivenessLabel } from '../../lib/trading/manualTune'
+import { aggressivenessLabel, guardrailLabel } from '../../lib/trading/manualTune'
 import { cn } from '../../lib/cn'
 import { Button, Card, CardContent, CardHeader, CardTitle, Input } from '../ui'
 
@@ -55,7 +57,7 @@ export function ManualTunePanel({
                 onClick={() => onApplyPreset(level)}
                 aria-pressed={tune.aggressiveness === level}
                 className={cn(
-                  'cursor-pointer rounded-lg border px-2 py-2 text-center',
+                  'cursor-pointer rounded-lg border px-2 py-2 text-center transition-colors duration-150',
                   tune.aggressiveness === level
                     ? 'border-accent bg-accent/20 text-accent'
                     : 'border-border bg-background/50 text-muted-foreground hover:text-foreground',
@@ -66,6 +68,9 @@ export function ManualTunePanel({
               </button>
             ))}
           </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Guardrails on this preset: <span className="text-foreground">{guardrailLabel(tune)}</span>
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -117,6 +122,50 @@ export function ManualTunePanel({
             value={tune.maxDailyLossPct}
             onChange={(e) => onUpdate({ maxDailyLossPct: Number(e.target.value) })}
           />
+        </div>
+
+        <div className="mt-4 rounded-lg border border-border bg-secondary/30 p-3">
+          <span className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-foreground">
+            <ShieldCheck className="h-3.5 w-3.5 text-up" aria-hidden="true" />
+            Risk guardrails
+          </span>
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            <label className="flex cursor-pointer items-start gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={tune.adaptiveRisk}
+                onChange={(e) => onUpdate({ adaptiveRisk: e.target.checked })}
+                className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border bg-background accent-[var(--color-accent)]"
+              />
+              <span>
+                <span className="block font-medium">Adaptive risk</span>
+                <span className="text-muted-foreground">Trade smaller after consecutive losses.</span>
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={tune.volatilityFilter}
+                onChange={(e) => onUpdate({ volatilityFilter: e.target.checked })}
+                className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border bg-background accent-[var(--color-accent)]"
+              />
+              <span>
+                <span className="block font-medium">Volatility filter</span>
+                <span className="text-muted-foreground">Stand aside when ATR spikes.</span>
+              </span>
+            </label>
+            <div className="sm:col-span-2">
+              <Input
+                label="Losses before stand-down (0 = off)"
+                type="number"
+                min={0}
+                max={10}
+                step={1}
+                value={tune.maxConsecutiveLosses}
+                onChange={(e) => onUpdate({ maxConsecutiveLosses: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+              />
+            </div>
+          </div>
         </div>
 
         {applied && (

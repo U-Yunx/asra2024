@@ -8,7 +8,7 @@
 import { X } from 'lucide-react'
 import type { AccountState, Position, RatesMap, TradeMode } from '../../lib/trading/types'
 import { pnlUsd } from '../../lib/trading/risk'
-import { formatDateTime, formatPrice, formatUnits, formatUsd } from '../../lib/format'
+import { formatDateTime, formatPct, formatPrice, formatUnits, formatUsd } from '../../lib/format'
 import { cn } from '../../lib/cn'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, EmptyState } from '../ui'
 
@@ -130,6 +130,9 @@ export function PositionsTable({
                               )}
                             >
                               {formatUsd(pnl)}
+                              <span className={cn('ml-2 text-xs font-normal', pnl >= 0 ? 'text-up/80' : 'text-down/80')}>
+                                {formatPct(p.entryEquity > 0 ? (pnl / p.entryEquity) * 100 : 0)}
+                              </span>
                             </td>
                             <td className="py-3 pr-4 text-right text-xs text-muted-foreground">
                               {formatDateTime(p.entryTime)}

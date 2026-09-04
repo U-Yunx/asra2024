@@ -5,7 +5,7 @@ import { DEFAULT_PAPER_BALANCE, usePaperAccount } from '../lib/trading/usePaperA
 import { useRobotPrefs, methodInterval, methodLabel, methodRiskDefaults } from '../lib/trading/robotPrefs'
 import { useRobotRecorder } from '../lib/trading/useRobotRecorder'
 import { autoTune } from '../lib/trading/autoTune'
-import { aggressivenessLabel, useManualTune } from '../lib/trading/manualTune'
+import { aggressivenessLabel, guardrailLabel, useManualTune } from '../lib/trading/manualTune'
 import { rankPairs, type RankedPair } from '../lib/trading/pairRanking'
 import { manualTargets } from '../lib/trading/manualMethod'
 import { fetchTimeSeries, useQuotes } from '../hooks/useMarketData'
@@ -13,9 +13,10 @@ import { useSelectedStrategy } from '../hooks/useSelectedStrategy'
 import { useAuth } from '../hooks/useAuth'
 import { useAccess, useBrokers, useProfile, useSubscriptions } from '../hooks/usePlatform'
 import { acceptRisk } from '../lib/platform'
-import { pipValueUsd, stopDistanceFromAtr, suggestPositionUnits } from '../lib/trading/risk'
+import { effectiveRiskPct, pipValueUsd, stopDistanceFromAtr, suggestPositionUnits } from '../lib/trading/risk'
 import { equity } from '../lib/trading/engine'
 import { INTERVALS, STRATEGY_META, STRATEGY_TYPES, intervalLabel } from '../lib/strategies'
+import { atr } from '../lib/strategies/indicators'
 import { WATCHLIST } from '../lib/watchlist'
 import { fn as invokeEdge } from '../lib/functions'
 import type { Bar, BrokerConnectionRow, Interval, StrategyConfig, StrategyType, TradingMethod, TunedResult } from '../lib/types'
@@ -551,6 +552,24 @@ export function Trading() {
           const bars = barsBySymbol[target.symbol]
           if (!bars || !target.best) continue
 
+          // Volatility stand-down: with the volatility filter on, skip pairs
+          // whose ATR is spiking (1.5× its recent level) — wild markets eat
+          // stop-losses for breakfast. Off by default; presets 1–2 turn it on.
+          if (account.risk.volatilityFilter && bars.length >= 30) {
+            const atrSeries = atr(bars, 14)
+            const lastAtr = atrSeries[atrSeries.length - 1] ?? 0
+            const prevAtr = atrSeries[Math.max(0, atrSeries.length - 20)] ?? 0
+            if (prevAtr > 0 && lastAtr > prevAtr * 1.5) {
+              setRobotLog((prev) =>
+                [
+                  `Skipped ${target.symbol}: volatility filter on and ATR is spiking — standing aside until the market settles.`,
+                  ...prev,
+                ].slice(0, 8),
+              )
+              continue
+            }
+          }
+
           // Per-trade TP/SL overrides (in pips) beat the risk-based defaults.
           const atrStop = stopDistanceFromAtr(bars, target.symbol)
           const stopPips =
@@ -567,7 +586,9 @@ export function Trading() {
           if (pipValue == null) continue
           const units = suggestPositionUnits({
             equity: equity(account, rates),
-            riskPct: account.risk.riskPerTradePct,
+            // Adaptive de-risking: after consecutive losses the robot quietly
+            // trades smaller (see effectiveRiskPct) until a win warms it back up.
+            riskPct: effectiveRiskPct(account),
             stopPips,
             pipValue,
           })
@@ -697,12 +718,15 @@ export function Trading() {
       takeProfitRatio: tune.takeProfitRatio,
       maxOpenPositions: tune.maxOpenPositions,
       maxDailyLossPct: tune.maxDailyLossPct,
+      adaptiveRisk: tune.adaptiveRisk,
+      volatilityFilter: tune.volatilityFilter,
+      maxConsecutiveLosses: tune.maxConsecutiveLosses,
     })
     setTuneApplied(true)
     setTuned(null)
     setRobotLog((prev) =>
       [
-        `Manual tune applied — ${aggressivenessLabel(tune.aggressiveness)} profile, ~${tune.targetProfitPct}% target per run, ${tune.sizeMultiplier}× position size.`,
+        `Manual tune applied — ${aggressivenessLabel(tune.aggressiveness)} profile, ~${tune.targetProfitPct}% target per run, ${tune.sizeMultiplier}× position size (guardrails: ${guardrailLabel(tune)}).`,
         ...prev,
       ].slice(0, 8),
     )

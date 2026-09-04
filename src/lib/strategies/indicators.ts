@@ -135,6 +135,33 @@ export function bollinger(
   return { upper, lower, middle }
 }
 
+/**
+ * Average true range (Wilder's smoothing) — a per-bar volatility gauge used by
+ * the signal quality filters (skip whipsaw crosses in quiet markets) and by the
+ * risk engine (ATR-aware stops, volatility stand-down). `out[i]` is the ATR
+ * ending at bar i; leading positions are null until there are `period` bars.
+ */
+export function atr(bars: Bar[], period = 14): (number | null)[] {
+  const out: (number | null)[] = new Array(bars.length).fill(null)
+  if (bars.length < 2) return out
+  const trs: number[] = []
+  for (let i = 1; i < bars.length; i++) {
+    const prev = bars[i - 1]
+    const b = bars[i]
+    trs.push(Math.max(b.high - b.low, Math.abs(b.high - prev.close), Math.abs(b.low - prev.close)))
+  }
+  if (trs.length < period) return out
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += trs[i]
+  let prevAtr = sum / period
+  out[period] = prevAtr
+  for (let i = period; i < trs.length; i++) {
+    prevAtr = (prevAtr * (period - 1) + trs[i]) / period
+    out[i + 1] = prevAtr
+  }
+  return out
+}
+
 const asSeries = (v: (number | null)[]) => v
 
 /** Compute the indicator series selected by a strategy config. */

@@ -28,14 +28,17 @@ export function RobotLivePrices({ pairs }: { pairs: string[] }) {
 
   return (
     <div className="rounded-xl border border-border bg-secondary/30 p-4">
-      <p className="mb-3 flex items-center gap-1.5 text-sm font-semibold text-foreground">
-        <Activity className="h-4 w-4 text-accent" aria-hidden="true" />
-        Live prices
+      <p className="mb-3 flex items-center justify-between gap-1.5 text-sm font-semibold text-foreground">
+        <span className="flex items-center gap-1.5">
+          <Activity className="h-4 w-4 text-accent" aria-hidden="true" />
+          Live prices
+        </span>
+        {rows.length > 0 && <span className="text-[11px] font-normal text-muted-foreground">{rows.length} pair{rows.length === 1 ? '' : 's'}</span>}
       </p>
       {rows.length === 0 ? (
         <p className="text-sm text-muted-foreground">{error ?? 'Waiting for prices…'}</p>
       ) : (
-        <ul className="space-y-2">
+        <ul className="space-y-2" aria-live="polite">
           {rows.map((q) => (
             <QuoteRow key={q.symbol} quote={q} />
           ))}

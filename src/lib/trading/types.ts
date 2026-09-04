@@ -79,6 +79,16 @@ export interface RiskConfig {
   breakEvenPips: number
   /** Start trailing the stop only after price is this many pips in profit. */
   trailActivationPips: number
+  /**
+   * Consecutive-loss circuit breaker: block new entries after N losses in a
+   * row (0 = off). "Loss" = any recent closed trade that lost money; manual
+   * closes and robot-stop closes don't count toward the streak.
+   */
+  maxConsecutiveLosses: number
+  /** Scale position size down after consecutive losses (risk-aware sizing). */
+  adaptiveRisk: boolean
+  /** Skip new entries when volatility (ATR) is spiking — stand aside. */
+  volatilityFilter: boolean
 }
 
 export const DEFAULT_RISK: RiskConfig = {
@@ -92,6 +102,9 @@ export const DEFAULT_RISK: RiskConfig = {
   trailPips: 15,
   breakEvenPips: 10,
   trailActivationPips: 12,
+  maxConsecutiveLosses: 0,
+  adaptiveRisk: true,
+  volatilityFilter: false,
 }
 
 /** The full persisted state of a paper account. */

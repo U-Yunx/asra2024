@@ -4,7 +4,7 @@
  * Everything is denominated in USD; non-USD quote currencies are converted
  * through the live watchlist rates.
  */
-import type { RatesMap, Side } from './types'
+import type { AccountState, ClosedTrade, RatesMap, Side } from './types'
 import type { Bar } from '../types'
 
 const CRYPTO_RE = /BTC|ETH|BNB|SOL|XRP|ADA|DOGE|LTC/
@@ -109,4 +109,33 @@ export function suggestPositionUnits(input: {
   // balance. One unit risks only `costPerUnit` (≈ $0.002 on EUR/USD with a
   // 20-pip stop), which any fundable micro account covers comfortably.
   return Math.max(1, units)
+}
+
+/**
+ * Count of the most recent closed trades that lost money, newest first. The
+ * streak breaks on any winning trade — and on manual or robot-stop closes,
+ * which shouldn't stand the robot down.
+ */
+export function consecutiveLosses(trades: ClosedTrade[]): number {
+  let streak = 0
+  for (const t of trades) {
+    if (t.pnl >= 0) break
+    if (t.closeReason === 'manual' || t.closeReason === 'robot_stop') break
+    streak++
+  }
+  return streak
+}
+
+/**
+ * Effective risk % per trade after adaptive de-risking. When `adaptiveRisk` is
+ * on, each consecutive loss shaves 10% off the base risk (floor 50% of base,
+ * absolute floor 0.25%) — so a cold robot quietly trades smaller until it
+ * warms up again, while a hot robot keeps full aggression.
+ */
+export function effectiveRiskPct(state: AccountState): number {
+  const base = state.risk.riskPerTradePct
+  if (!state.risk.adaptiveRisk) return base
+  const streak = consecutiveLosses(state.trades)
+  const multiplier = Math.max(0.5, 1 - streak * 0.1)
+  return Math.max(0.25, base * multiplier)
 }

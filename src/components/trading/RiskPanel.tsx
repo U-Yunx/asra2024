@@ -2,6 +2,8 @@
  * RiskPanel — the risk-management editor the robot enforces. Every knob maps
  * 1:1 onto the engine's RiskConfig; changing a field pushes a partial patch
  * through the parent (which may gate auto-trading on the risk disclaimer).
+ * The guardrails at the bottom (adaptive risk, volatility filter, consecutive-
+ * loss breaker) keep the robot competitive without gambling the account.
  */
 import { RotateCcw, ShieldAlert } from 'lucide-react'
 import type { RiskConfig } from '../../lib/trading/types'
@@ -128,6 +130,15 @@ export function RiskPanel({ risk, onChange, onReset, isLive }: Props) {
             step={1}
             suffix="pips"
           />
+          <Field
+            label="Losses before stand-down"
+            value={risk.maxConsecutiveLosses}
+            onChange={(v) => onChange({ maxConsecutiveLosses: Math.max(0, Math.round(v)) })}
+            min={0}
+            max={10}
+            step={1}
+            suffix="losses"
+          />
         </div>
         <label className="mt-4 flex cursor-pointer items-center gap-2 text-sm text-foreground">
           <input
@@ -137,6 +148,30 @@ export function RiskPanel({ risk, onChange, onReset, isLive }: Props) {
             className="h-4 w-4 cursor-pointer rounded border-border bg-background accent-[var(--color-accent)]"
           />
           Trailing stop
+        </label>
+        <label className="mt-2 flex cursor-pointer items-start gap-2 text-sm text-foreground">
+          <input
+            type="checkbox"
+            checked={risk.adaptiveRisk}
+            onChange={(e) => onChange({ adaptiveRisk: e.target.checked })}
+            className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border bg-background accent-[var(--color-accent)]"
+          />
+          <span>
+            <span className="block">Adaptive risk</span>
+            <span className="block text-xs text-muted-foreground">Trade smaller after consecutive losses.</span>
+          </span>
+        </label>
+        <label className="mt-2 flex cursor-pointer items-start gap-2 text-sm text-foreground">
+          <input
+            type="checkbox"
+            checked={risk.volatilityFilter}
+            onChange={(e) => onChange({ volatilityFilter: e.target.checked })}
+            className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border bg-background accent-[var(--color-accent)]"
+          />
+          <span>
+            <span className="block">Volatility filter</span>
+            <span className="block text-xs text-muted-foreground">Stand aside when ATR spikes.</span>
+          </span>
         </label>
         <label className="mt-2 flex cursor-pointer items-center gap-2 text-sm text-foreground">
           <input
