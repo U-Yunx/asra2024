@@ -30,6 +30,10 @@ export function CandleChart({ bars, height = 360 }: { bars: Bar[]; height?: numb
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  // Identity of the series currently fitted: fit the visible range when a new
+  // series loads (mount / pair or interval change) but NOT on every live tick —
+  // otherwise a ticking last bar keeps zooming the chart back out.
+  const fittedRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -75,7 +79,11 @@ export function CandleChart({ bars, height = 360 }: { bars: Bar[]; height?: numb
   useEffect(() => {
     if (!seriesRef.current || bars.length === 0) return
     seriesRef.current.setData(bars.map(toCandle))
-    chartRef.current?.timeScale().fitContent()
+    const first = bars[0].time
+    if (fittedRef.current !== first) {
+      fittedRef.current = first
+      chartRef.current?.timeScale().fitContent()
+    }
   }, [bars])
 
   return (

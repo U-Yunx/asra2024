@@ -2,25 +2,39 @@
  * LiveChartPanel — interactive price chart for the trading page. Lets the
  * trader pick a watchlist symbol and interval, fetches fresh bars through the
  * market-data Edge Function and renders them with the shared candlestick chart.
+ * When a live `rates` map is provided (the same quote feed as the rest of the
+ * page) the newest candle ticks with the current price in real time, and bars
+ * are re-fetched periodically so closed candles appear without changing the
+ * pair or interval.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { LineChart } from 'lucide-react'
 import type { Bar, Interval } from '../../lib/types'
+import type { RatesMap } from '../../lib/trading/types'
 import { fetchTimeSeries } from '../../hooks/useMarketData'
 import { INTERVALS } from '../../lib/strategies'
 import { WATCHLIST } from '../../lib/watchlist'
+import { formatPrice } from '../../lib/format'
 import { CandleChart } from '../CandleChart'
 import { Card, CardContent, CardHeader, CardTitle, Select, Skeleton } from '../ui'
+
+/** How often to re-fetch bars for new candles (the function caches per-interval, so this stays cheap). */
+const REFETCH_MS = 60_000
 
 export function LiveChartPanel({
   initialSymbol,
   initialInterval,
+  rates,
 }: {
   initialSymbol: string
   initialInterval: Interval
+  /** Live quote map from useQuotes — ticks the last candle in real time. */
+  rates?: RatesMap
 }) {
   const [symbol, setSymbol] = useState(initialSymbol)
-  const [interval, setInterval] = useState<Interval>(initialInterval)
+  // Named `setChartInterval` so the global `setInterval` timer stays usable in
+  // the periodic-refetch effect below (a `setInterval` state setter would shadow it).
+  const [chartInterval, setChartInterval] = useState<Interval>(initialInterval)
   const [bars, setBars] = useState<Bar[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -31,7 +45,7 @@ export function LiveChartPanel({
     setError(null)
     setBars(null)
     void (async () => {
-      const res = await fetchTimeSeries({ symbol, interval, outputsize: 300 })
+      const res = await fetchTimeSeries({ symbol, interval: chartInterval, outputsize: 300 })
       if (!active) return
       setLoading(false)
       if (res.kind !== 'ok' || !res.data || res.data.length === 0) {
@@ -43,7 +57,39 @@ export function LiveChartPanel({
     return () => {
       active = false
     }
-  }, [symbol, interval])
+  }, [symbol, chartInterval])
+
+  // Periodically re-fetch so new candles appear even when the pair/interval
+  // hasn't changed. Modest cadence — the Edge Function serves bars from its
+  // cache for the interval TTL, so this doesn't burn upstream credits.
+  useEffect(() => {
+    const id = setInterval(() => {
+      void (async () => {
+        const res = await fetchTimeSeries({ symbol, interval: chartInterval, outputsize: 300 })
+        if (res.kind === 'ok' && res.data && res.data.length > 0) {
+          setBars(res.data)
+          setError(null)
+        }
+      })()
+    }, REFETCH_MS)
+    return () => clearInterval(id)
+  }, [symbol, chartInterval])
+
+  // Live tick: extend the newest candle with the current price so the chart's
+  // right edge moves in real time between bar re-fetches.
+  const live = rates?.[symbol] ?? null
+  const displayBars = useMemo(() => {
+    if (!bars || live == null || bars.length === 0) return bars
+    const last = bars[bars.length - 1]
+    const ticked = bars.slice(0, -1)
+    ticked.push({
+      ...last,
+      close: live,
+      high: Math.max(last.high, live),
+      low: Math.min(last.low, live),
+    })
+    return ticked
+  }, [bars, live])
 
   return (
     <Card>
@@ -68,8 +114,8 @@ export function LiveChartPanel({
           </Select>
           <Select
             label="Interval"
-            value={interval}
-            onChange={(e) => setInterval(e.target.value as Interval)}
+            value={chartInterval}
+            onChange={(e) => setChartInterval(e.target.value as Interval)}
             className="w-32"
             aria-label="Chart interval"
           >
@@ -79,6 +125,11 @@ export function LiveChartPanel({
               </option>
             ))}
           </Select>
+          {live != null && (
+            <span className="mb-1 font-mono tnum text-sm text-foreground" aria-live="polite">
+              {formatPrice(live)}
+            </span>
+          )}
         </div>
       </CardHeader>
       <CardContent>
@@ -91,8 +142,8 @@ export function LiveChartPanel({
           >
             {error}
           </div>
-        ) : bars ? (
-          <CandleChart bars={bars} height={300} />
+        ) : displayBars ? (
+          <CandleChart bars={displayBars} height={300} />
         ) : null}
       </CardContent>
     </Card>

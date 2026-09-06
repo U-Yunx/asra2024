@@ -1543,7 +1543,7 @@ export function Trading() {
           isLive={mode !== 'paper'}
         />
         <div className="space-y-6 lg:col-span-2">
-          <LiveChartPanel initialSymbol={strategy.pair} initialInterval={strategy.interval} />
+          <LiveChartPanel initialSymbol={strategy.pair} initialInterval={strategy.interval} rates={rates} />
           <TradeForm account={acc} rates={rates} onOpen={open} />
         </div>
       </div>

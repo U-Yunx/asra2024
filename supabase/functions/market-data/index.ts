@@ -1836,6 +1836,25 @@ async function handleQuotes(providerId: string, apiKey: string, priority: string
     // through Yahoo on a light per-instance throttle.
     const cryptoStale = toRefresh.filter(({ symbol }) => isCryptoSymbol(symbol));
     const fxStale = toRefresh.filter(({ symbol }) => !isCryptoSymbol(symbol));
+    let fxRefreshed = 0;
+
+    // Priority FX pairs (the ones the caller is actively watching) go FIRST:
+    // the crypto fallback below can drain the shared credit budget, and the
+    // user shouldn't be left staring at a frozen quote for the pair they have
+    // open while less relevant symbols refresh.
+    for (const { symbol } of fxStale) {
+      if (fxRefreshed >= FREE_FX_BUDGET || !prioritySet.has(symbol)) continue;
+      if (!canUseCredit()) break;
+      try {
+        const q = await provider.fetchQuote("", symbol);
+        if (await applyQuote(symbol, q)) {
+          refreshed++;
+          fxRefreshed++;
+        }
+      } catch {
+        // keep whatever we had
+      }
+    }
 
     if (cryptoStale.length > 0 && canUseFreeBatch()) {
       const batch = await binanceBatchQuote(cryptoStale.map((x) => x.symbol));
@@ -1854,7 +1873,6 @@ async function handleQuotes(providerId: string, apiKey: string, priority: string
       }
     }
 
-    let fxRefreshed = 0;
     for (const { symbol } of fxStale) {
       if (fxRefreshed >= FREE_FX_BUDGET) break;
       if (!canUseCredit()) break;

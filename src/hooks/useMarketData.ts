@@ -268,7 +268,12 @@ export function useQuotes(
     const channel = supabase.channel('market-quotes')
     channel
       .on('broadcast', { event: 'quotes' }, (payload) => {
-        const msg = payload as unknown as BroadcastMessage
+        // Realtime hands the broadcast callback the full message wrapper
+        // ({ event, payload }); the quotes live under the inner `payload`.
+        // Read both shapes defensively — a top-level read alone silently
+        // dropped every broadcast, leaving pages on the poll interval only.
+        const msg = ((payload as { payload?: BroadcastMessage } | null)?.payload ??
+          payload) as unknown as BroadcastMessage
         if (!mounted.current) return
         if (!Array.isArray(msg.quotes) || msg.quotes.length === 0) return
         setState({
