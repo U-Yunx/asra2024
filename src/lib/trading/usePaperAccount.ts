@@ -196,17 +196,45 @@ export function usePaperAccount() {
     [],
   )
 
-  /** Close only robot-opened (strategy-tagged) positions at market, leaving
-   * manual positions open. Called when the robot stops. */
+  /** Close every position the robot opened (strategy-tagged, not 'manual') at
+   * market, leaving manual trades the user placed untouched. Paper/managed run
+   * the pure engine reducer (journal tagged 'robot_stop'); live OANDA/MT place
+   * a real close order through the broker for each robot position, throttled,
+   * then re-sync the authoritative mirror — a stopped robot never leaves its
+   * own trades open on the book, in paper or live. */
   const closeRobotPositions = useCallback(
-    (rates: RatesMap): { closed: number } => {
+    async (rates: RatesMap): Promise<{ closed: number; error: string | null }> => {
       const cur = stateRef.current
-      if (!cur || cur.positions.length === 0) return { closed: 0 }
-      const { state, closed } = engineCloseRobotPositions(cur, rates)
-      if (closed.length > 0) setAccount(state)
-      return { closed: closed.length }
+      if (!cur || cur.positions.length === 0) return { closed: 0, error: null }
+      const robotPositions = cur.positions.filter((p) => p.strategy && p.strategy !== 'manual')
+      if (robotPositions.length === 0) return { closed: 0, error: null }
+
+      // Ledger-backed modes: pure engine close on the local account state.
+      if (broker.mode === 'paper' || broker.mode === 'managed') {
+        const { state, closed } = engineCloseRobotPositions(cur, rates)
+        if (closed.length > 0) setAccount(state)
+        return { closed: closed.length, error: null }
+      }
+
+      // Live broker: one real close order per robot position (throttled so
+      // broker rate limits are respected), then refresh the mirror so the UI
+      // reflects what the broker actually did.
+      let closed = 0
+      let lastError: string | null = null
+      for (const p of robotPositions) {
+        const price = rates[p.symbol] ?? p.entryPrice
+        const { error } = await broker.closePosition(p.id, 'robot_stop', price, rates)
+        if (error) {
+          lastError = error
+        } else {
+          closed += 1
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350))
+      }
+      await broker.refresh()
+      return { closed, error: lastError }
     },
-    [],
+    [broker],
   )
 
   const reset = useCallback(

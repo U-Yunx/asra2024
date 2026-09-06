@@ -46,9 +46,9 @@ function ModeToggle({ mode, onChange }: { mode: BrokerMode; onChange: (m: Broker
     { value: 'mt', label: 'Live (MT4/5)' },
   ]
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className="flex w-full flex-col items-stretch gap-1 sm:w-auto sm:items-end">
       <div
-        className="inline-flex flex-wrap items-center gap-1 rounded-lg border border-border bg-secondary/40 p-1"
+        className="grid w-full grid-cols-2 gap-1 rounded-lg border border-border bg-secondary/40 p-1 sm:inline-flex sm:w-auto sm:flex-nowrap"
         role="group"
         aria-label="Trading mode"
       >
@@ -59,7 +59,7 @@ function ModeToggle({ mode, onChange }: { mode: BrokerMode; onChange: (m: Broker
             onClick={() => onChange(o.value)}
             aria-pressed={mode === o.value}
             className={cn(
-              'h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors duration-150',
+              'h-10 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors duration-150 sm:h-8',
               mode === o.value ? 'bg-accent text-black' : 'text-muted-foreground hover:text-foreground',
             )}
           >
@@ -341,6 +341,7 @@ export function Trading() {
   const [endsAt, setEndsAt] = useState<number | null>(null)
   const [remaining, setRemaining] = useState<number | null>(null)
   const [tuning, setTuning] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [tuned, setTuned] = useState<TunedResult | null>(null)
   const [showManualTune, setShowManualTune] = useState(false)
   const [tuneApplied, setTuneApplied] = useState(false)
@@ -363,22 +364,30 @@ export function Trading() {
   }, [quotes])
 
   // Stopping the robot also flattens every position it opened — a stopped
-  // robot never leaves open trades on the book. Shared by the manual Stop
-  // button and the auto-run expiry.
-  const stopRobotAndFlatten = () => {
+  // robot never leaves open trades on the book. Auto-trading is disabled FIRST
+  // so no new orders fire while positions are closing. On live brokers the
+  // flatten sends a real close order per robot position through the broker.
+  const stopRobotAndFlatten = async () => {
     if (!account) return
-    const { closed } = closeRobotPositions(ratesRef.current)
     setRisk({ autoTrade: false })
     setEndsAt(null)
     setRemaining(null)
-    setRobotLog((prev) =>
-      [
-        closed > 0
-          ? `Robot stopped — ${closed} robot position${closed === 1 ? '' : 's'} closed at market. Manual positions are untouched.`
-          : 'Robot stopped — no open robot positions to close.',
-        ...prev,
-      ].slice(0, 8),
-    )
+    setStopping(true)
+    try {
+      const { closed, error } = await closeRobotPositions(ratesRef.current)
+      setRobotLog((prev) =>
+        [
+          error
+            ? `Robot stopped — ${error}`
+            : closed > 0
+              ? `Robot stopped — ${closed} robot position${closed === 1 ? '' : 's'} closed at market. Manual positions are untouched.`
+              : 'Robot stopped — no open robot positions to close.',
+          ...prev,
+        ].slice(0, 8),
+      )
+    } finally {
+      setStopping(false)
+    }
   }
 
   // Stop-loss / take-profit are enforced on every quote tick.
@@ -427,24 +436,33 @@ export function Trading() {
     }
   }, [autoTrade, prefs.durationMinutes, account?.risk.autoTrade])
 
+  // Guard so the expiry tick only fires its close once even if the interval
+  // keeps ticking while the broker closes positions.
+  const expiryBusyRef = useRef(false)
   useEffect(() => {
     if (!endsAt) return
+    expiryBusyRef.current = false
     const tick = () => {
       const left = Math.max(0, Math.round((endsAt - Date.now()) / 1000))
       setRemaining(left)
-      if (left <= 0) {
-        const closed = closeRobotPositions(ratesRef.current).closed
+      if (left <= 0 && !expiryBusyRef.current) {
+        expiryBusyRef.current = true
+        // Stop first — no new orders while the robot's positions flatten.
         setRisk({ autoTrade: false })
-        setRobotLog((prev) =>
-          [
-            closed > 0
-              ? `Robot auto-run finished — trading paused, ${closed} robot position${closed === 1 ? '' : 's'} closed at market.`
-              : 'Robot auto-run finished — trading paused, no open robot positions to close.',
-            ...prev,
-          ].slice(0, 8),
-        )
         setEndsAt(null)
         setRemaining(null)
+        void closeRobotPositions(ratesRef.current).then(({ closed, error }) => {
+          setRobotLog((prev) =>
+            [
+              error
+                ? `Robot auto-run finished — trading paused, but ${error}`
+                : closed > 0
+                  ? `Robot auto-run finished — trading paused, ${closed} robot position${closed === 1 ? '' : 's'} closed at market.`
+                  : 'Robot auto-run finished — trading paused, no open robot positions to close.',
+              ...prev,
+            ].slice(0, 8),
+          )
+        })
       }
     }
     tick()
@@ -473,18 +491,20 @@ export function Trading() {
     const maxLoss = prefs.overallMaxLossUsd > 0 && pnl <= -prefs.overallMaxLossUsd
     const maxProfit = prefs.overallMaxProfitUsd > 0 && pnl >= prefs.overallMaxProfitUsd
     if (!maxLoss && !maxProfit) return
+    // Stop first — no new orders while the robot's positions flatten.
     setRisk({ autoTrade: false })
-    const closed = closeRobotPositions(rates).closed
     sessionStartRef.current = null
     setSessionStart(null)
-    setRobotLog((prev) =>
-      [
-        maxLoss
-          ? `Session guard hit the overall max loss (${formatUsd(prefs.overallMaxLossUsd)}) at ${formatUsd(pnl)} — robot stopped, ${closed} robot position${closed === 1 ? '' : 's'} closed.`
-          : `Session guard hit the overall max profit (${formatUsd(prefs.overallMaxProfitUsd)}) at ${formatUsd(pnl)} — robot stopped, ${closed} robot position${closed === 1 ? '' : 's'} closed.`,
-        ...prev,
-      ].slice(0, 8),
-    )
+    void closeRobotPositions(rates).then(({ closed, error }) => {
+      setRobotLog((prev) =>
+        [
+          error
+            ? `Session guard hit the overall ${maxLoss ? 'max loss' : 'max profit'} (${formatUsd(maxLoss ? prefs.overallMaxLossUsd : prefs.overallMaxProfitUsd)}) at ${formatUsd(pnl)} — robot stopped, but ${error}`
+            : `Session guard hit the overall ${maxLoss ? 'max loss' : 'max profit'} (${formatUsd(maxLoss ? prefs.overallMaxLossUsd : prefs.overallMaxProfitUsd)}) at ${formatUsd(pnl)} — robot stopped, ${closed} robot position${closed === 1 ? '' : 's'} closed.`,
+          ...prev,
+        ].slice(0, 8),
+      )
+    })
   }, [account, autoTrade, rates, prefs.overallMaxLossUsd, prefs.overallMaxProfitUsd, closeRobotPositions, setRisk])
 
   /**
@@ -818,9 +838,15 @@ export function Trading() {
       <CardContent>
         <div className="flex flex-col gap-5">
           {/* Start / stop */}
-          <div className="flex flex-col gap-3 rounded-xl border border-border bg-secondary/30 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div
+            className={cn(
+              'flex flex-col gap-3 rounded-xl border p-4 sm:flex-row sm:items-center sm:justify-between',
+              autoTrade ? 'border-up/30 bg-up/5' : 'border-border bg-secondary/30',
+            )}
+          >
             <div>
-              <p className="text-sm font-semibold text-foreground">
+              <p className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                {autoTrade && <span className="h-2 w-2 shrink-0 animate-pulse-dot rounded-full bg-up" aria-hidden="true" />}
                 {autoTrade ? 'Robot is live — trading the strongest setups' : 'Robot is standing by'}
               </p>
               <p className="mt-0.5 text-sm text-muted-foreground">
@@ -833,12 +859,14 @@ export function Trading() {
             </div>
             <Button
               variant={autoTrade ? 'danger' : 'primary'}
-              onClick={() => (autoTrade ? stopRobotAndFlatten() : guardedSetRisk({ autoTrade: true }))}
-              disabled={!canRunRobot}
-              className="shrink-0"
+              size="lg"
+              onClick={() => void (autoTrade ? stopRobotAndFlatten() : guardedSetRisk({ autoTrade: true }))}
+              disabled={!canRunRobot || stopping}
+              loading={stopping}
+              className={cn('w-full shrink-0 sm:w-auto sm:min-w-44', autoTrade && 'animate-pulse-glow')}
             >
               {autoTrade ? <Pause className="h-4 w-4" aria-hidden="true" /> : <Play className="h-4 w-4" aria-hidden="true" />}
-              {autoTrade ? 'Stop robot' : 'Start robot'}
+              {autoTrade ? (stopping ? 'Closing positions…' : 'Stop robot & close all') : 'Start robot'}
             </Button>
           </div>
 
@@ -1464,7 +1492,7 @@ export function Trading() {
                     : 'Trade with simulated money — micro accounts work from $10. The robot sizes every position from your risk settings, always sets a stop-loss, and records everything in your journal. No sign-in required — sign in to back it up to your account and unlock the auto-trading robot.'}
                 </p>
               </div>
-              <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-end">
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-end">
                 <div className="flex flex-col gap-1.5">
                   <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Quick start</span>
                   <div className="flex flex-wrap gap-1.5" role="group" aria-label="Quick starting balance">
@@ -1475,7 +1503,7 @@ export function Trading() {
                         aria-pressed={seed === p.value}
                         onClick={() => setSeed(p.value)}
                         className={cn(
-                          'cursor-pointer rounded border px-2 py-1 text-xs font-medium transition-colors duration-150',
+                          'cursor-pointer rounded border px-2 py-1.5 text-xs font-medium transition-colors duration-150',
                           seed === p.value
                             ? 'border-accent/50 bg-accent/15 text-accent'
                             : 'border-border bg-secondary/40 text-muted-foreground hover:text-foreground',
@@ -1493,8 +1521,10 @@ export function Trading() {
                   step={10}
                   value={seed}
                   onChange={(e) => setSeed(Math.max(10, Number(e.target.value) || 10))}
+                  className="w-full sm:w-48"
                 />
                 <Button
+                  className="w-full sm:w-auto"
                   onClick={() => {
                     reset(seed)
                     if (mode === 'managed') setBrokerMode('managed')

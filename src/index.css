@@ -34,6 +34,8 @@
   --color-pick: oklch(0.8 0.15 80);
 
   --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+  --animate-pulse-dot-danger: pulse-dot-danger 1.6s ease-in-out infinite;
+  --animate-pulse-glow: pulse-glow 1.8s ease-in-out infinite;
   --animate-price-flash-up: price-flash-up 600ms ease-out;
   --animate-price-flash-down: price-flash-down 600ms ease-out;
   --animate-fade-up: fade-up 400ms ease-out both;
@@ -56,6 +58,26 @@
     50% {
       opacity: 0.7;
       box-shadow: 0 0 0 4px oklch(0.76 0.17 150 / 0%);
+    }
+  }
+  @keyframes pulse-dot-danger {
+    0%,
+    100% {
+      opacity: 1;
+      box-shadow: 0 0 0 0 oklch(0.65 0.21 25 / 50%);
+    }
+    50% {
+      opacity: 0.7;
+      box-shadow: 0 0 0 5px oklch(0.65 0.21 25 / 0%);
+    }
+  }
+  @keyframes pulse-glow {
+    0%,
+    100% {
+      box-shadow: 0 0 20px -6px oklch(0.65 0.21 25 / 55%);
+    }
+    50% {
+      box-shadow: 0 0 36px -4px oklch(0.65 0.21 25 / 90%);
     }
   }
   @keyframes price-flash-up {
