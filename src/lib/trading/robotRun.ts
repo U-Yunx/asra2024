@@ -14,7 +14,6 @@
  * Live OANDA / MetaTrader mirrors are never mirrored — their authoritative
  * state lives at the broker and their robot keeps running in the browser only.
  */
-import type { User } from '@supabase/supabase-js'
 import { isSupabaseConfigured, supabase } from '../supabase'
 import type { RobotPrefs, StrategyType, TradingMethod } from '../types'
 
@@ -62,13 +61,13 @@ export interface RobotRunSyncInput {
 }
 
 /** Load the current run row for the account (null when none exists). */
-export async function loadRobotRun(user: User, accountId: string): Promise<RobotRunRow | null> {
-  if (!isSupabaseConfigured || !user || !accountId) return null
+export async function loadRobotRun(userId: string, accountId: string): Promise<RobotRunRow | null> {
+  if (!isSupabaseConfigured || !userId || !accountId) return null
   try {
     const { data } = await supabase
       .from('robot_runs')
       .select('*')
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .eq('account_id', accountId)
       .maybeSingle()
     return (data as RobotRunRow) ?? null
@@ -82,11 +81,11 @@ export async function loadRobotRun(user: User, accountId: string): Promise<Robot
  * runner can take over when this page closes. Safe to call repeatedly — it
  * replaces the whole row.
  */
-export async function saveRobotRun(user: User, accountId: string, input: RobotRunSyncInput): Promise<void> {
-  if (!isSupabaseConfigured || !user || !accountId) return
+export async function saveRobotRun(userId: string, accountId: string, input: RobotRunSyncInput): Promise<void> {
+  if (!isSupabaseConfigured || !userId || !accountId) return
   const now = new Date().toISOString()
   const row = {
-    user_id: user.id,
+    user_id: userId,
     account_id: accountId,
     status: 'running' as const,
     method: input.prefs.method,
@@ -118,13 +117,13 @@ export async function saveRobotRun(user: User, accountId: string, input: RobotRu
 }
 
 /** Tell the server the robot has been stopped / the run ended. */
-export async function stopRobotRun(user: User, accountId: string): Promise<void> {
-  if (!isSupabaseConfigured || !user || !accountId) return
+export async function stopRobotRun(userId: string, accountId: string): Promise<void> {
+  if (!isSupabaseConfigured || !userId || !accountId) return
   try {
     await supabase
       .from('robot_runs')
       .update({ status: 'stopped', updated_at: new Date().toISOString() })
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .eq('account_id', accountId)
   } catch {
     /* best-effort */
@@ -138,9 +137,9 @@ const lastHeartbeat: { key: string; at: number } = { key: '', at: 0 }
  * Refresh the client heartbeat (throttled). While the page is open this tells
  * the background runner to stand down; when it stops the server takes over.
  */
-export async function heartbeatRobotRun(user: User, accountId: string): Promise<void> {
-  if (!isSupabaseConfigured || !user || !accountId) return
-  const key = `${user.id}:${accountId}`
+export async function heartbeatRobotRun(userId: string, accountId: string): Promise<void> {
+  if (!isSupabaseConfigured || !userId || !accountId) return
+  const key = `${userId}:${accountId}`
   const now = Date.now()
   if (lastHeartbeat.key === key && now - lastHeartbeat.at < HEARTBEAT_MIN_MS) return
   lastHeartbeat.key = key
@@ -149,7 +148,7 @@ export async function heartbeatRobotRun(user: User, accountId: string): Promise<
     await supabase
       .from('robot_runs')
       .update({ client_heartbeat_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .eq('account_id', accountId)
   } catch {
     /* best-effort */

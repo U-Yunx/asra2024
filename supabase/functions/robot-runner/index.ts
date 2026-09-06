@@ -1,6 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders } from "jsr:@supabase/supabase-js@2/cors";
 import {
   type AccountState,
   type Bar,
@@ -46,6 +45,12 @@ import {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-robot-token",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
 
 // Same 18-symbol watchlist as src/lib/watchlist.ts / market-data (kept in sync).
 const WATCHLIST = [
@@ -439,16 +444,23 @@ async function tickRun(
   const hb = run.client_heartbeat_at ? new Date(run.client_heartbeat_at).getTime() : 0;
   if (hb && nowMs - hb < CLIENT_ALIVE_MS) return { action: "standby" };
 
-  // 2) Atomic claim — only one invocation may tick this run per cooldown.
+  // 2) Atomic claim — only one invocation may tick this run per cooldown, and
+  //    only while the heartbeat is still stale. If the page came back online
+  //    between the initial read and this update, the claim misses (0 rows) and
+  //    the browser keeps trading.
   const cooldownIso = new Date(nowMs - TICK_COOLDOWN_MS).toISOString();
+  const staleHBIso = new Date(nowMs - CLIENT_ALIVE_MS).toISOString();
   const claimed = await admin
     .from("robot_runs")
     .update({ last_tick_at: new Date().toISOString(), last_error: null })
     .eq("id", run.id)
     .eq("status", "running")
-    .or(`last_tick_at.is.null,last_tick_at.lt.${cooldownIso}`)
+    .or(
+      `and(last_tick_at.is.null,last_tick_at.lt.${cooldownIso}),` +
+        `and(client_heartbeat_at.is.null,client_heartbeat_at.lt.${staleHBIso})`,
+    )
     .select("id");
-  if (!claimed.data || claimed.data.length === 0) return { action: "cooldown" };
+  if (!claimed.data || claimed.data.length === 0) return { action: "standby" };
 
   // 3) Auto-run duration elapsed while the page was closed → stop + flatten.
   if (run.ends_at && nowMs >= new Date(run.ends_at).getTime()) {
@@ -456,8 +468,8 @@ async function tickRun(
     return { action: "finished", reason: "duration_elapsed" };
   }
 
-  // 4) Access lost while away → stop trading (positions are left for the owner
-  //    to manage on return, matching the browser's behaviour when access ends).
+  // 4) Access lost while away → stop the run and close its robot positions so
+  //    a stopped robot never leaves its own trades open on the book.
   if (!(await hasAccess(admin, run.user_id))) {
     await finishRun(admin, run, "access_lost");
     return { action: "finished", reason: "access_lost" };
@@ -570,12 +582,14 @@ async function tickRun(
   const cyc = runRobotCycle(next, cycleInputs, config)
   next = cyc.state
 
-  // 10) Persist only when something actually changed.
+  // 10) Persist the account only when something changed; record an equity
+  //     history point every tick either way so the Performance curve stays
+  //     complete while the page is closed.
   if (next !== account) {
     await saveAccount(admin, run.user_id, next)
-    const sessionId = await ensureSession(admin, run, next.initialBalance)
-    await recordHistory(admin, run, sessionId, next, rates)
   }
+  const sessionId = await ensureSession(admin, run, next.initialBalance)
+  await recordHistory(admin, run, sessionId, next, rates)
 
   return { action: "tick" }
 }

@@ -569,6 +569,105 @@ export function Trading() {
     })
   }, [account, autoTrade, rates, prefs.overallMaxLossUsd, prefs.overallMaxProfitUsd, closeRobotPositions, setRisk])
 
+  // ---------------------------------------------------------------------------
+  // Background continuation (ledger-backed accounts only — paper + managed live).
+  //
+  // While the robot runs, the browser mirrors the run's full configuration into
+  // `robot_runs` and heartbeats `client_heartbeat_at`. The scheduled
+  // `robot-runner` Edge Function (pg_cron, every minute) takes over any run
+  // whose heartbeat goes stale — i.e. this page is closed or was refreshed —
+  // and keeps trading with the exact same engine rules, enforcing the auto-run
+  // duration, the session profit/loss guard and the user's access. Live OANDA /
+  // MetaTrader mirrors are never mirrored (their state lives at the broker).
+  const ledgerRobot = Boolean(user && account && !loading && (mode === 'paper' || mode === 'managed'))
+
+  // Mirror the run config + heartbeat while running; mark the run stopped the
+  // moment the robot stops (button, duration elapsed, session guard, access).
+  useEffect(() => {
+    if (!ledgerRobot || !user || !account?.id) return
+    const uid = user.id
+    const accountId = account.id
+    if (!autoTrade) {
+      void stopRobotRun(uid, accountId)
+      return
+    }
+    void saveRobotRun(uid, accountId, {
+      prefs,
+      pairs: robotPairs,
+      endsAt,
+      sessionStartEquity: sessionStartRef.current ?? sessionStart,
+      sizeMultiplier: tune.sizeMultiplier,
+    })
+    const id = setInterval(() => void heartbeatRobotRun(uid, accountId), 20_000)
+    return () => clearInterval(id)
+  }, [ledgerRobot, autoTrade, user, account?.id, robotPairs, endsAt, sessionStart, prefs, tune.sizeMultiplier])
+
+  // Reconcile with the server-side run after load (once per account): if the
+  // background runner already finished the run while the page was closed
+  // (duration elapsed, session guard hit, or access lost), the account row
+  // reflects the stop — align the UI: clear the flag, countdown and session
+  // baseline, and flatten defensively. If the run is still live, resume the
+  // countdown / session baseline from the authoritative server row (e.g. when
+  // returning on another device) and heartbeat so the runner stands down.
+  const reconcileRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!ledgerRobot || !user || !account?.id || loading) return
+    if (reconcileRef.current === account.id) return
+    reconcileRef.current = account.id
+    const uid = user.id
+    const accountId = account.id
+    let cancelled = false
+    void (async () => {
+      const run = await loadRobotRun(uid, accountId)
+      if (cancelled || !run) return
+      if (run.status !== 'running') {
+        // The server stopped/finished it while we were away.
+        if (account.risk.autoTrade) {
+          setRisk({ autoTrade: false })
+          clearRobotRunning(uid)
+          clearRunEnd(uid)
+          clearSessionStart(uid)
+          setEndsAt(null)
+          setRemaining(null)
+        }
+        void closeRobotPositions(ratesRef.current).then(({ closed, error }) => {
+          setRobotLog((prev) =>
+            [
+              error
+                ? `Your robot's background run ended while you were away (${run.status === 'finished' ? 'it finished on schedule' : 'it was stopped'}) — trading paused${error ? `, but ${error}` : ''}.`
+                : closed > 0
+                  ? `Your robot's background run ended while you were away — trading paused, ${closed} open robot position${closed === 1 ? '' : 's'} closed at market.`
+                  : `Your robot's background run ended while you were away — trading paused.`,
+              ...prev,
+            ].slice(0, 8),
+          )
+        })
+        return
+      }
+      // Still running server-side: heartbeat so it stands down, then resume the
+      // countdown / session baseline from the row when the local copy is gone.
+      void heartbeatRobotRun(uid, accountId)
+      if (run.ends_at) {
+        const end = new Date(run.ends_at).getTime()
+        if (end > Date.now() && endsAt == null) {
+          setEndsAt(end)
+          setRemaining(Math.max(0, Math.round((end - Date.now()) / 1000)))
+          saveRunEnd(end, uid)
+        }
+      }
+      if (run.session_start_equity != null && sessionStartRef.current == null) {
+        const baseline = Number(run.session_start_equity)
+        sessionStartRef.current = baseline
+        setSessionStart(baseline)
+        saveSessionStart(baseline, uid)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledgerRobot, user, account?.id, account?.risk.autoTrade, loading])
+
   /**
    * The multi-pair / multi-strategy robot. On every quote tick it fetches fresh
    * bars for the pairs in scope, evaluates ALL strategies on each pair, and
