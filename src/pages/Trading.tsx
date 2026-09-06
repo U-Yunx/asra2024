@@ -366,6 +366,15 @@ export function Trading() {
     return r
   }, [quotes])
 
+  // Symbols whose latest quote is stale (market closed / feed stalled). The
+  // robot only ENTERS on a live quote — it can still close, flatten or mark
+  // to market existing positions at the last known price.
+  const staleSymbols = useMemo(() => {
+    const s = new Set<string>()
+    for (const q of quotes ?? []) if (q.stale) s.add(q.symbol)
+    return s
+  }, [quotes])
+
   // Stopping the robot also closes EVERY open trade — robot and manual — so
   // the open-positions panel is left empty. Auto-trading is disabled FIRST so
   // no new orders fire while positions are closing. On live brokers the
@@ -733,6 +742,18 @@ export function Trading() {
           const bars = barsBySymbol[target.symbol]
           if (!bars || !target.best) continue
 
+          // Never enter on a stale price (weekend / feed stalled) — a
+          // position opened at a price that isn't live can't be managed.
+          if (staleSymbols.has(target.symbol)) {
+            setRobotLog((prev) =>
+              [
+                `Skipped ${target.symbol}: no live quote right now (market closed or feed stalled) — the robot only enters on a live price.`,
+                ...prev,
+              ].slice(0, 8),
+            )
+            continue
+          }
+
           // Volatility stand-down: with the volatility filter on, skip pairs
           // whose ATR is spiking (1.5× its recent level) — wild markets eat
           // stop-losses for breakfast. Off by default; presets 1–2 turn it on.
@@ -842,6 +863,7 @@ export function Trading() {
     prefs.maxPerPair,
     prefs.maxOpenTrades,
     rates,
+    staleSymbols,
     marketKind,
     runCycle,
     tune.sizeMultiplier,

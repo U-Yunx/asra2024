@@ -99,6 +99,7 @@ async function authorized(req: Request, admin: ReturnType<typeof createClient>):
 interface Quote {
   symbol: string;
   price: number | null;
+  stale?: boolean;
 }
 
 async function fetchQuotes(priority: string[]): Promise<Quote[]> {
@@ -250,7 +251,6 @@ function toRows(account: AccountState, userId: string): {
       entry_equity: p.entryEquity,
       close_reason: null,
       strategy: p.strategy ?? null,
-      created_at: null,
     })),
     ...account.trades.map<PaperTradeRow>((t) => ({
       id: t.id,
@@ -270,7 +270,6 @@ function toRows(account: AccountState, userId: string): {
       entry_equity: t.entryEquity,
       close_reason: t.closeReason,
       strategy: t.strategy ?? null,
-      created_at: null,
     })),
   ];
   return {
@@ -305,8 +304,20 @@ async function loadAccount(admin: ReturnType<typeof createClient>, run: RobotRun
 async function saveAccount(admin: ReturnType<typeof createClient>, userId: string, account: AccountState): Promise<void> {
   const { account: accRow, trades } = toRows(account, userId);
   await admin.from("paper_accounts").upsert(accRow, { onConflict: "user_id" });
-  await admin.from("paper_trades").delete().eq("user_id", userId);
-  if (trades.length > 0) await admin.from("paper_trades").insert(trades);
+  if (trades.length > 0) {
+    // Upsert by primary key instead of delete-all + re-insert. Every row
+    // carries its own id, so a single bad row can never wipe the journal,
+    // and `created_at` is omitted so the column default applies (explicit
+    // nulls would violate the NOT NULL constraint and lose every trade).
+    await admin.from("paper_trades").upsert(trades, { onConflict: "id" });
+    // Drop only the rows that are no longer part of the account (e.g. a
+    // position the browser closed locally while the server stood down).
+    const ids = trades.map((t) => t.id);
+    const idList = `(${ids.map((id) => `"${id}"`).join(",")})`;
+    await admin.from("paper_trades").delete().eq("user_id", userId).not("id", "in", idList);
+  } else {
+    await admin.from("paper_trades").delete().eq("user_id", userId);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +497,11 @@ async function tickRun(
   const scanSymbols = run.auto_pick_pairs ? WATCHLIST : (run.pairs ?? []).length > 0 ? run.pairs : WATCHLIST.slice(0, 2);
   const quotes = await fetchQuotes(scanSymbols);
   const rates: RatesMap = {};
-  for (const q of quotes) if (q.price != null) rates[q.symbol] = q.price;
+  const staleSymbols = new Set<string>();
+  for (const q of quotes) {
+    if (q.price != null) rates[q.symbol] = q.price;
+    if (q.stale) staleSymbols.add(q.symbol);
+  }
 
   const interval = intervalForMethod(run.method);
   const barsBySymbol: Record<string, Bar[]> = {};
@@ -524,6 +539,11 @@ async function tickRun(
     if (price == null) continue
     const bars = barsBySymbol[target.symbol]
     if (!bars) continue
+
+    // Never ENTER on a stale price (market closed / feed stalled) — the
+    // robot only opens when it has a live quote to open at. Stale prices are
+    // still fine for closing and flattening at the last known price.
+    if (staleSymbols.has(target.symbol)) continue
 
     // Volatility stand-down (off by default).
     if (account.risk.volatilityFilter && bars.length >= 30) {
