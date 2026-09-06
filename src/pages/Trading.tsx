@@ -168,9 +168,19 @@ function LiveSummary({ fn, label }: { fn: 'broker-oanda' | 'broker-mt'; label: s
     return (
       <Card>
         <CardContent>
-          <p role="alert" className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-red-200">
-            {error}
-          </p>
+          <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-red-200">
+            <p>{error}</p>
+            <p className="mt-1.5 text-xs text-red-200/75">
+              The broker may be rejecting the automated login, or the connection needs attention.{' '}
+              <Link
+                to="/brokers"
+                className="font-medium underline decoration-red-200/40 underline-offset-2 hover:text-red-100"
+              >
+                Check it on the Brokers page
+              </Link>
+              .
+            </p>
+          </div>
         </CardContent>
       </Card>
     )

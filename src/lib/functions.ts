@@ -4,6 +4,7 @@
  * single `{ data, error }` result and guards against an unconfigured client so
  * callers never need to know whether Supabase is connected.
  */
+import { FunctionsHttpError } from '@supabase/supabase-js'
 import { isSupabaseConfigured, supabase } from './supabase'
 
 interface InvokeOptions {
@@ -29,6 +30,16 @@ export async function fn<T>(
       body: options.body as string | Record<string, unknown> | undefined,
     })
     if (error) {
+      // Non-2xx responses: the edge functions return `{ ok: false, error: "…" }`,
+      // so the response body carries the REAL reason (e.g. the broker's own
+      // rejection message, like an account the broker has blocked). Prefer it
+      // over the generic fallback — otherwise a failed live-account load only
+      // ever says "Could not load your MetaTrader account." and hides why.
+      if (error instanceof FunctionsHttpError) {
+        const body = (await error.context.json().catch(() => null)) as EdgeErrorShape | null
+        const real = body?.error ?? body?.message
+        if (real) return { data: null, error: real }
+      }
       return { data: null, error: options.fallback ?? error.message }
     }
     if (data && typeof data === 'object' && 'error' in (data as object)) {
