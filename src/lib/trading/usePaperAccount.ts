@@ -14,6 +14,7 @@ import type {
 } from './types'
 import { applySignal, canOpen, closeAllPositions, closeRobotPositions as engineCloseRobotPositions, createAccount, openPosition } from './engine'
 import { clearLocal, loadLocal, loadRemote, resetRemote, saveLocal, saveRemote } from './persistence'
+import { clearRobotRunning, loadRobotRunning, saveRobotRunning } from './robotState'
 import { createBroker, type BrokerAdapter } from './broker'
 
 const MODE_KEY = 'fx-toolkit.broker-mode'
@@ -55,6 +56,14 @@ export function usePaperAccount() {
       if (u) next = await loadRemote(u)
       if (!next) next = loadLocal()
       if (!next) next = createAccount(DEFAULT_PAPER_BALANCE)
+      // Restore the robot's on/off state across refreshes / tab closes. Live
+      // OANDA / MetaTrader mirrors are never saved (the broker is the source of
+      // truth), so the flag written on every start/stop is the only record of
+      // whether the robot was running. Paper / managed already carry it on the
+      // account — the flag is applied uniformly so every mode behaves the same.
+      if (next && loadRobotRunning(u?.id)) {
+        next = { ...next, risk: { ...next.risk, autoTrade: true } }
+      }
       if (active) {
         setAccount(next)
         setLoading(false)
@@ -174,6 +183,12 @@ export function usePaperAccount() {
     const cur = stateRef.current
     if (!cur) return
     setAccount({ ...cur, risk: { ...cur.risk, ...patch } })
+    // Mirror the robot on/off flag so a refresh / tab close restores it in
+    // every mode — live broker mirrors are never persisted, so this flag is
+    // their only record of whether the robot was running.
+    if (typeof patch.autoTrade === 'boolean') {
+      saveRobotRunning(patch.autoTrade, userRef.current?.id)
+    }
   }, [])
 
   /** Emergency stop: disable auto-trading. */
@@ -182,6 +197,7 @@ export function usePaperAccount() {
     if (!cur) return
     if (!cur.risk.autoTrade) return
     setAccount({ ...cur, risk: { ...cur.risk, autoTrade: false } })
+    saveRobotRunning(false, userRef.current?.id)
   }, [])
 
   /** Close every open position at the current market price (stop-loss button). */
@@ -280,6 +296,9 @@ export function usePaperAccount() {
     (initialBalance: number) => {
       clearLocal()
       setAccount(createAccount(initialBalance))
+      // A fresh account starts with the robot off — forget any saved running
+      // flag so a reload doesn't bring it back on.
+      clearRobotRunning(userRef.current?.id)
       // Wipe the Supabase mirror too, otherwise a signed-in user's reload loads
       // the old account + trades back from the server (see resetRemote).
       const u = userRef.current
