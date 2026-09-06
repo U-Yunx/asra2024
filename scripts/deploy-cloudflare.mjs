@@ -79,6 +79,23 @@ const contentTypeFor = (name) => MIME[path.extname(name).toLowerCase()] || 'appl
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+// Cloudflare Pages caps the commit message on a deployment at 384 bytes;
+// wrangler enforces the same limit (truncateUtf8Bytes) before appending it
+// to the deployment form. Mirror it so long messages (e.g. squash-merge
+// descriptions) can never get the deployment rejected.
+const MAX_COMMIT_MESSAGE_BYTES = 384
+
+function truncateUtf8Bytes(str, maxBytes) {
+  let byteCount = 0
+  let truncated = ''
+  for (const char of str) {
+    byteCount += Buffer.byteLength(char)
+    if (byteCount > maxBytes) break
+    truncated += char
+  }
+  return truncated
+}
+
 class DeployError extends Error {}
 
 function fail(message) {
@@ -269,7 +286,10 @@ async function createDeployment(accountId, projectName, token, manifest, branch)
   form.append('branch', branch)
   form.append('commit_dirty', 'false')
   if (process.env.GITHUB_SHA) form.append('commit_hash', process.env.GITHUB_SHA)
-  if (process.env.GITHUB_COMMIT_MESSAGE) form.append('commit_message', process.env.GITHUB_COMMIT_MESSAGE)
+  if (process.env.GITHUB_COMMIT_MESSAGE) {
+    const message = truncateUtf8Bytes(process.env.GITHUB_COMMIT_MESSAGE, MAX_COMMIT_MESSAGE_BYTES)
+    form.append('commit_message', message)
+  }
 
   for (const name of ['_headers', '_redirects']) {
     const abs = path.join(DIST_DIR, name)
