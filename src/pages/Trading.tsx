@@ -4,6 +4,7 @@ import { Activity, Check, ListChecks, Pause, Play, ShieldAlert, Sliders, Sparkle
 import { DEFAULT_PAPER_BALANCE, usePaperAccount } from '../lib/trading/usePaperAccount'
 import { useRobotPrefs, methodInterval, methodLabel, methodRiskDefaults } from '../lib/trading/robotPrefs'
 import { useRobotRecorder } from '../lib/trading/useRobotRecorder'
+import { clearRunEnd, clearSessionStart, loadRunEnd, loadSessionStart, saveRunEnd, saveSessionStart } from '../lib/trading/robotState'
 import { autoTune } from '../lib/trading/autoTune'
 import { aggressivenessLabel, guardrailLabel, useManualTune } from '../lib/trading/manualTune'
 import { rankPairs, type RankedPair } from '../lib/trading/pairRanking'
@@ -427,15 +428,60 @@ export function Trading() {
     rates,
   })
 
-  // Auto-run timer: stops the robot when the chosen duration elapses.
+  // Auto-run timer: stops the robot when the chosen duration elapses. The end
+  // time is persisted so a refresh (or returning after the tab was closed)
+  // resumes the countdown where it left off — and if the window already
+  // elapsed while the page was closed, the robot stops and flattens cleanly on
+  // load instead of trading past its schedule. Fresh starts anchor the window
+  // to now.
   useEffect(() => {
+    if (!account || loading) return
+    const uid = user?.id
     if (autoTrade && prefs.durationMinutes) {
-      setEndsAt(Date.now() + prefs.durationMinutes * 60_000)
+      if (endsAt == null) {
+        const persisted = loadRunEnd(uid)
+        if (persisted != null && persisted > Date.now()) {
+          setEndsAt(persisted)
+          setRemaining(Math.max(0, Math.round((persisted - Date.now()) / 1000)))
+        } else if (persisted != null) {
+          // The run window elapsed while the page was closed — stop the robot
+          // and close what it left open, exactly as if it had been running.
+          setRisk({ autoTrade: false })
+          clearRunEnd(uid)
+          void closeRobotPositions(ratesRef.current).then(({ closed, error }) => {
+            setRobotLog((prev) =>
+              [
+                error
+                  ? `Robot auto-run ended while you were away — trading paused, but ${error}`
+                  : closed > 0
+                    ? `Robot auto-run ended while you were away — trading paused, ${closed} robot position${closed === 1 ? '' : 's'} closed at market.`
+                    : 'Robot auto-run ended while you were away — trading paused, no open robot positions to close.',
+                ...prev,
+              ].slice(0, 8),
+            )
+          })
+        } else {
+          const end = Date.now() + prefs.durationMinutes * 60_000
+          setEndsAt(end)
+          saveRunEnd(end, uid)
+        }
+      }
     } else if (!(account?.risk.autoTrade ?? false)) {
       setEndsAt(null)
       setRemaining(null)
+      clearRunEnd(uid)
     }
-  }, [autoTrade, prefs.durationMinutes, account?.risk.autoTrade])
+  }, [
+    account,
+    loading,
+    autoTrade,
+    prefs.durationMinutes,
+    endsAt,
+    account?.risk.autoTrade,
+    user?.id,
+    setRisk,
+    closeRobotPositions,
+  ])
 
   // Guard so the expiry tick only fires its close once even if the interval
   // keeps ticking while the broker closes positions.
@@ -471,6 +517,18 @@ export function Trading() {
     return () => clearInterval(id)
   }, [endsAt, setRisk, closeRobotPositions])
 
+  // Restore the session-guard baseline across reloads so a run that spanned a
+  // refresh keeps measuring profit/loss from where it started, not from where
+  // you returned.
+  useEffect(() => {
+    if (!account || loading) return
+    if (!account.risk.autoTrade || sessionStartRef.current != null) return
+    const saved = loadSessionStart(user?.id)
+    if (saved == null) return
+    sessionStartRef.current = saved
+    setSessionStart(saved)
+  }, [account, loading, account?.risk.autoTrade, user?.id])
+
   /**
    * Session profit / loss guard. While the robot runs it tracks the equity
    * change since the run started and stops + flattens everything as soon as the
@@ -478,6 +536,7 @@ export function Trading() {
    */
   useEffect(() => {
     if (!account || !autoTrade) {
+      if (sessionStartRef.current != null) clearSessionStart(user?.id)
       sessionStartRef.current = null
       setSessionStart(null)
       return
@@ -486,6 +545,7 @@ export function Trading() {
     if (sessionStartRef.current == null) {
       sessionStartRef.current = currentEquity
       setSessionStart(currentEquity)
+      saveSessionStart(currentEquity, user?.id)
       return
     }
     const pnl = currentEquity - sessionStartRef.current
