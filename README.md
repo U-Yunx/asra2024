@@ -48,29 +48,39 @@ the "Supabase connection required" screen.
 
 The repo ships a GitHub Actions workflow (`.github/workflows/deploy-cloudflare.yml`)
 that builds the app and deploys it to Cloudflare Pages automatically on every
-push to `main` (SPA fallback and security headers come from `public/_redirects`
-and `public/_headers`, which Cloudflare Pages honors natively).
+push to `main`. The deploy step (`node scripts/deploy-cloudflare.mjs`) talks to
+the **Cloudflare REST API** directly — it resolves your account from the API
+token, auto-creates the Pages project `ana24` if it doesn't exist yet, and
+uploads `dist/` (SPA fallback and security headers come from
+`public/_redirects` and `public/_headers`, which the script attaches to every
+deployment).
 
 ### One-time setup
 
-1. **Create the Pages project** in the Cloudflare dashboard
-   (Workers & Pages → Create → Pages → connect a Git repository), or let the
-   first workflow run create it. The workflow deploys to a project named
-   `ana24` (see `wrangler.toml`).
-2. **Create an API token** with the *Cloudflare Pages — Edit* permission:
-   Dashboard → My Profile → API Tokens → Create Token.
-3. **Add two GitHub Actions secrets** (Settings → Secrets and variables →
-   Actions) — never put these in `.env.local` or a `VITE_` variable; they are
+1. **Create an API token** with the *Cloudflare Pages — Edit* permission:
+   Dashboard → My Profile → API Tokens → Create Token. Issue it on the account
+   you want to deploy to — a **fresh** Cloudflare account works with zero extra
+   setup, because the project is created automatically on first deploy.
+2. **Add one GitHub Actions secret** (Settings → Secrets and variables →
+   Actions) — never put this in `.env.local` or a `VITE_` variable; it is
    CI-only and must not reach the browser:
-   - `CLOUDFLARE_API_TOKEN` — the API token from step 2.
-   - `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account ID (dashboard,
-     right-hand sidebar).
+   - `CLOUDFLARE_API_TOKEN` — the API token from step 1.
+
+   > If you had the old setup, also **delete the `CLOUDFLARE_ACCOUNT_ID` secret**
+   > — it is no longer used. (Only if your token can see *multiple* accounts,
+   > add a plain `CLOUDFLARE_ACCOUNT_ID` *variable* to pick one.)
 
 That's it. Push to `main` and the workflow runs `npm ci` → `npm test` →
-`npm run build` → `wrangler pages deploy ./dist --project-name=ana24`.
+`npm run build` → `node scripts/deploy-cloudflare.mjs`, which reports the live
+URL when done. You can also trigger it manually from the **Actions** tab.
 
-To deploy locally instead: `npx wrangler pages deploy` (reads
-`wrangler.toml`); log in first with `npx wrangler login`.
+To deploy locally instead: build first, then run the same API script with your
+token exported:
+
+```bash
+CLOUDFLARE_API_TOKEN=... npm run build
+CLOUDFLARE_API_TOKEN=... node scripts/deploy-cloudflare.mjs
+```
 
 ## Security
 

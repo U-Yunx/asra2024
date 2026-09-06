@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  deployments: write
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -38,11 +37,10 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || vars.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || vars.VITE_SUPABASE_ANON_KEY }}
 
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v4
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy ./dist --project-name=ana24
-          environment: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+      - name: Deploy to Cloudflare Pages via API
+        run: node scripts/deploy-cloudflare.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_COMMIT_MESSAGE: ${{ github.event.head_commit.message || 'Deploy via GitHub Actions' }}

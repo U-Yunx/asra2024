@@ -4,7 +4,7 @@
  *
  * Verifies that the variables the browser bundle needs at runtime are present
  * in the environment. This runs from `npm run predeploy` (wired in package.json
- * before `wrangler pages deploy`). It exits non-zero if anything required is
+ * before the Cloudflare deploy step). It exits non-zero if anything required is
  * missing so a broken deploy never ships.
  *
  * The two VITE_* values are PUBLIC (URL + publishable/anon key) — they are safe

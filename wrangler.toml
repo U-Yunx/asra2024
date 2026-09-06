@@ -1,10 +1,13 @@
 # Cloudflare Pages configuration for ANA24.
 #
-# The GitHub Actions workflow (.github/workflows/deploy-cloudflare.yml) runs
-# `wrangler pages deploy` on every push to `main`, using the build output
-# directory below. The same config lets you deploy locally:
+# Deployment is now driven by the Cloudflare REST API via
+# `scripts/deploy-cloudflare.mjs` (see .github/workflows/deploy-cloudflare.yml).
+# The account is resolved from the CLOUDFLARE_API_TOKEN at deploy time — nothing
+# here binds a specific account — and the Pages project is created automatically
+# on the first deploy if it does not exist.
 #
-#   npx wrangler pages deploy
+# This file is kept only as a local reference for anyone who wants to push with
+# `wrangler` manually; CI does not use wrangler.
 
 name = "ana24"
 compatibility_date = "2025-06-01"
