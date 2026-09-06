@@ -237,6 +237,45 @@ export function usePaperAccount() {
     [broker],
   )
 
+  /** Close EVERY open position — robot AND manual — at the current market
+   * price. Used by the "Stop robot & close all" button so a stopped robot
+   * leaves the open-positions panel empty, not just its own trades. Paper and
+   * managed run the pure engine reducer (journal tagged 'risk'); live
+   * OANDA/MT place a real close order through the broker for each position,
+   * throttled, then re-sync the authoritative mirror. */
+  const flattenAll = useCallback(
+    async (rates: RatesMap): Promise<{ closed: number; error: string | null }> => {
+      const cur = stateRef.current
+      if (!cur || cur.positions.length === 0) return { closed: 0, error: null }
+
+      // Ledger-backed modes: pure engine close on the local account state.
+      if (broker.mode === 'paper' || broker.mode === 'managed') {
+        const { state, closed } = closeAllPositions(cur, rates)
+        if (closed.length > 0) setAccount(state)
+        return { closed: closed.length, error: null }
+      }
+
+      // Live broker: one real close order per open position (throttled so
+      // broker rate limits are respected), then refresh the mirror so the UI
+      // reflects what the broker actually did.
+      let closed = 0
+      let lastError: string | null = null
+      for (const p of cur.positions) {
+        const price = rates[p.symbol] ?? p.entryPrice
+        const { error } = await broker.closePosition(p.id, 'robot_stop', price, rates)
+        if (error) {
+          lastError = error
+        } else {
+          closed += 1
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350))
+      }
+      await broker.refresh()
+      return { closed, error: lastError }
+    },
+    [broker],
+  )
+
   const reset = useCallback(
     (initialBalance: number) => {
       clearLocal()
@@ -280,6 +319,7 @@ export function usePaperAccount() {
     stopRobot,
     closeAll,
     closeRobotPositions,
+    flattenAll,
     reset,
   }
 }

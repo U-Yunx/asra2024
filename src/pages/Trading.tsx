@@ -285,6 +285,7 @@ export function Trading() {
     runCycle,
     setRisk,
     closeRobotPositions,
+    flattenAll,
     reset,
   } = usePaperAccount()
   const [strategy, updateStrategy] = useSelectedStrategy()
@@ -363,10 +364,10 @@ export function Trading() {
     return r
   }, [quotes])
 
-  // Stopping the robot also flattens every position it opened — a stopped
-  // robot never leaves open trades on the book. Auto-trading is disabled FIRST
-  // so no new orders fire while positions are closing. On live brokers the
-  // flatten sends a real close order per robot position through the broker.
+  // Stopping the robot also closes EVERY open trade — robot and manual — so
+  // the open-positions panel is left empty. Auto-trading is disabled FIRST so
+  // no new orders fire while positions are closing. On live brokers the
+  // flatten sends a real close order per position through the broker.
   const stopRobotAndFlatten = async () => {
     if (!account) return
     setRisk({ autoTrade: false })
@@ -374,14 +375,14 @@ export function Trading() {
     setRemaining(null)
     setStopping(true)
     try {
-      const { closed, error } = await closeRobotPositions(ratesRef.current)
+      const { closed, error } = await flattenAll(ratesRef.current)
       setRobotLog((prev) =>
         [
           error
             ? `Robot stopped — ${error}`
             : closed > 0
-              ? `Robot stopped — ${closed} robot position${closed === 1 ? '' : 's'} closed at market. Manual positions are untouched.`
-              : 'Robot stopped — no open robot positions to close.',
+              ? `Robot stopped — ${closed} open position${closed === 1 ? '' : 's'} closed at market. Open-positions panel cleared.`
+              : 'Robot stopped — no open positions to close.',
           ...prev,
         ].slice(0, 8),
       )
