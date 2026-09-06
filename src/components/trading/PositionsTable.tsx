@@ -69,15 +69,15 @@ export function PositionsTable({
             message="Open a trade with the form above, or start the robot and it will trade on signals automatically."
           />
         ) : (
-          <div className="space-y-4 overflow-x-auto">
+          <div className="space-y-4">
             {groups.map(([symbol, rows]) => {
               const cap = perPairCap(robotCaps)
               const atCap = rows.length >= cap
               return (
                 <div key={symbol} className="overflow-hidden rounded-lg border border-border/60">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 bg-secondary/40 px-3 py-2">
-                    <span className="text-sm font-semibold text-foreground">{symbol}</span>
-                    <div className="flex items-center gap-2">
+                    <span className="whitespace-nowrap text-sm font-semibold text-foreground">{symbol}</span>
+                    <div className="flex flex-wrap items-center gap-2">
                       <Badge
                         className={cn(
                           atCap ? 'border-amber/40 bg-amber/10 text-amber' : 'border-border bg-muted text-muted-foreground',
@@ -85,74 +85,81 @@ export function PositionsTable({
                       >
                         {rows.length}/{cap} open
                       </Badge>
-                      <span className="text-xs text-muted-foreground">{rows.length} position{rows.length === 1 ? '' : 's'}</span>
+                      <span className="whitespace-nowrap text-xs text-muted-foreground">
+                        {rows.length} position{rows.length === 1 ? '' : 's'}
+                      </span>
                     </div>
                   </div>
-                  <table className="w-full min-w-[680px] text-sm">
-                    <thead>
-                      <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-                        <th className="pb-2 pr-4 font-medium">Side</th>
-                        <th className="pb-2 pr-4 text-right font-medium">Units</th>
-                        <th className="pb-2 pr-4 text-right font-medium">Entry</th>
-                        <th className="pb-2 pr-4 text-right font-medium">Mark</th>
-                        <th className="pb-2 pr-4 text-right font-medium">Stop / Target</th>
-                        <th className="pb-2 pr-4 text-right font-medium">P&L</th>
-                        <th className="pb-2 pr-4 text-right font-medium">Opened</th>
-                        <th className="pb-2 font-medium" aria-label="Actions" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map((p) => {
-                        const mark = rates[p.symbol] ?? p.entryPrice
-                        const pnl = pnlUsd(p.side, p.entryPrice, mark, p.units, p.symbol, rates)
-                        return (
-                          <tr key={p.id} className="border-b border-border/60 last:border-b-0">
-                            <td className="py-3 pr-4">
-                              <span
+                  {/* The table scrolls inside its own wrapper so the right-hand
+                      columns (P&L, Opened, Close) stay reachable on narrow
+                      screens — a clipped ancestor would otherwise cut them off. */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[680px] text-sm">
+                      <thead>
+                        <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                          <th className="whitespace-nowrap pb-2 pr-4 font-medium">Side</th>
+                          <th className="whitespace-nowrap pb-2 pr-4 text-right font-medium">Units</th>
+                          <th className="whitespace-nowrap pb-2 pr-4 text-right font-medium">Entry</th>
+                          <th className="whitespace-nowrap pb-2 pr-4 text-right font-medium">Mark</th>
+                          <th className="whitespace-nowrap pb-2 pr-4 text-right font-medium">Stop / Target</th>
+                          <th className="whitespace-nowrap pb-2 pr-4 text-right font-medium">P&L</th>
+                          <th className="whitespace-nowrap pb-2 pr-4 text-right font-medium">Opened</th>
+                          <th className="whitespace-nowrap pb-2 font-medium" aria-label="Actions" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((p) => {
+                          const mark = rates[p.symbol] ?? p.entryPrice
+                          const pnl = pnlUsd(p.side, p.entryPrice, mark, p.units, p.symbol, rates)
+                          return (
+                            <tr key={p.id} className="border-b border-border/60 last:border-b-0">
+                              <td className="whitespace-nowrap py-3 pr-4">
+                                <span
+                                  className={cn(
+                                    'rounded px-1.5 py-0.5 text-xs font-semibold',
+                                    p.side === 'long' ? 'bg-up/15 text-up' : 'bg-down/15 text-down',
+                                  )}
+                                >
+                                  {p.side.toUpperCase()}
+                                </span>
+                              </td>
+                              <td className="tnum whitespace-nowrap py-3 pr-4 text-right font-mono">{formatUnits(p.units)}</td>
+                              <td className="tnum whitespace-nowrap py-3 pr-4 text-right font-mono">{formatPrice(p.entryPrice)}</td>
+                              <td className="tnum whitespace-nowrap py-3 pr-4 text-right font-mono">{formatPrice(mark)}</td>
+                              <td className="tnum whitespace-nowrap py-3 pr-4 text-right font-mono">
+                                {formatPrice(p.stopPrice)} / {formatPrice(p.takeProfitPrice)}
+                              </td>
+                              <td
                                 className={cn(
-                                  'rounded px-1.5 py-0.5 text-xs font-semibold',
-                                  p.side === 'long' ? 'bg-up/15 text-up' : 'bg-down/15 text-down',
+                                  'tnum whitespace-nowrap py-3 pr-4 text-right font-mono font-semibold',
+                                  pnl >= 0 ? 'text-up' : 'text-down',
                                 )}
                               >
-                                {p.side.toUpperCase()}
-                              </span>
-                            </td>
-                            <td className="tnum py-3 pr-4 text-right font-mono">{formatUnits(p.units)}</td>
-                            <td className="tnum py-3 pr-4 text-right font-mono">{formatPrice(p.entryPrice)}</td>
-                            <td className="tnum py-3 pr-4 text-right font-mono">{formatPrice(mark)}</td>
-                            <td className="tnum py-3 pr-4 text-right font-mono">
-                              {formatPrice(p.stopPrice)} / {formatPrice(p.takeProfitPrice)}
-                            </td>
-                            <td
-                              className={cn(
-                                'tnum py-3 pr-4 text-right font-mono font-semibold',
-                                pnl >= 0 ? 'text-up' : 'text-down',
-                              )}
-                            >
-                              {formatUsd(pnl)}
-                              <span className={cn('ml-2 text-xs font-normal', pnl >= 0 ? 'text-up/80' : 'text-down/80')}>
-                                {formatPct(p.entryEquity > 0 ? (pnl / p.entryEquity) * 100 : 0)}
-                              </span>
-                            </td>
-                            <td className="py-3 pr-4 text-right text-xs text-muted-foreground">
-                              {formatDateTime(p.entryTime)}
-                            </td>
-                            <td className="py-3 text-right">
-                              <Button
-                                variant="danger"
-                                size="sm"
-                                onClick={() => onClose(p.id)}
-                                aria-label={`Close ${p.symbol} position`}
-                              >
-                                <X className="h-3.5 w-3.5" aria-hidden="true" />
-                                Close
-                              </Button>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
+                                {formatUsd(pnl)}
+                                <span className={cn('ml-2 text-xs font-normal', pnl >= 0 ? 'text-up/80' : 'text-down/80')}>
+                                  {formatPct(p.entryEquity > 0 ? (pnl / p.entryEquity) * 100 : 0)}
+                                </span>
+                              </td>
+                              <td className="whitespace-nowrap py-3 pr-4 text-right text-xs text-muted-foreground">
+                                {formatDateTime(p.entryTime)}
+                              </td>
+                              <td className="whitespace-nowrap py-3 text-right">
+                                <Button
+                                  variant="danger"
+                                  size="sm"
+                                  onClick={() => onClose(p.id)}
+                                  aria-label={`Close ${p.symbol} position`}
+                                >
+                                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                                  Close
+                                </Button>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )
             })}
