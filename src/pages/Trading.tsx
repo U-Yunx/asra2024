@@ -1,10 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Activity, Check, ListChecks, Pause, Play, ShieldAlert, Sliders, Sparkles, Target, Timer, Wallet } from 'lucide-react'
 import { DEFAULT_PAPER_BALANCE, usePaperAccount } from '../lib/trading/usePaperAccount'
 import { useRobotPrefs, methodInterval, methodLabel, methodRiskDefaults } from '../lib/trading/robotPrefs'
 import { useRobotRecorder } from '../lib/trading/useRobotRecorder'
 import { clearRobotRunning, clearRunEnd, clearSessionStart, loadRunEnd, loadSessionStart, saveRunEnd, saveSessionStart } from '../lib/trading/robotState'
+import {
+  clearActivity,
+  loadActivityLog,
+  loadLastRun,
+  saveActivityLog,
+  saveLastRun,
+  MAX_ACTIVITY,
+  type ActivityEntry,
+} from '../lib/trading/robotActivity'
 import { heartbeatRobotRun, loadRobotRun, saveRobotRun, stopRobotRun } from '../lib/trading/robotRun'
 import { autoTune } from '../lib/trading/autoTune'
 import { aggressivenessLabel, guardrailLabel, useManualTune } from '../lib/trading/manualTune'
@@ -339,8 +348,11 @@ export function Trading() {
   const needsRiskAccept = mode === 'managed' && (profile?.risk_accepted ?? false) !== true
 
   const [seed, setSeed] = useState(DEFAULT_PAPER_BALANCE)
-  const [robotLog, setRobotLog] = useState<string[]>([])
-  const [lastRun, setLastRun] = useState<number | null>(null)
+  // The activity feed + "last run" are hydrated from localStorage so a refresh
+  // (or returning after closing the tab) keeps showing what the robot has been
+  // doing — every entry is timestamped and re-stamped on each update.
+  const [robotLog, setRobotLog] = useState<ActivityEntry[]>(() => loadActivityLog(user?.id))
+  const [lastRun, setLastRun] = useState<number | null>(() => loadLastRun(user?.id))
   const [endsAt, setEndsAt] = useState<number | null>(null)
   const [remaining, setRemaining] = useState<number | null>(null)
   const [tuning, setTuning] = useState(false)
@@ -375,6 +387,50 @@ export function Trading() {
     return s
   }, [quotes])
 
+  // Re-hydrate the feed when the signed-in identity becomes known (auth loads
+  // asynchronously) — the feed is scoped per user, so switching users swaps it.
+  const activityUidRef = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    const uid = user?.id
+    if (activityUidRef.current === uid) return
+    activityUidRef.current = uid
+    setRobotLog(loadActivityLog(uid))
+    setLastRun(loadLastRun(uid))
+  }, [user?.id])
+
+  // Append timestamped entries to the activity feed and mirror it to
+  // localStorage so it survives refreshes and tab closes.
+  const pushLog = useCallback(
+    (lines: string[]) => {
+      if (lines.length === 0) return
+      const stamped = lines.map((m) => ({ t: Date.now(), m }))
+      setRobotLog((prev) => {
+        const next = [...stamped, ...prev].slice(0, MAX_ACTIVITY)
+        saveActivityLog(next, user?.id)
+        return next
+      })
+    },
+    [user?.id],
+  )
+
+  // Record + persist when the robot last ran a successful cycle.
+  const noteRun = useCallback(() => {
+    const t = Date.now()
+    setLastRun(t)
+    saveLastRun(t, user?.id)
+  }, [user?.id])
+
+  // Reset also wipes the persisted activity feed so a fresh account starts clean.
+  const handleReset = useCallback(
+    (initialBalance: number) => {
+      clearActivity(user?.id)
+      setRobotLog([])
+      setLastRun(null)
+      reset(initialBalance)
+    },
+    [reset, user?.id],
+  )
+
   // Stopping the robot also closes EVERY open trade — robot and manual — so
   // the open-positions panel is left empty. Auto-trading is disabled FIRST so
   // no new orders fire while positions are closing. On live brokers the
@@ -387,16 +443,13 @@ export function Trading() {
     setStopping(true)
     try {
       const { closed, error } = await flattenAll(ratesRef.current)
-      setRobotLog((prev) =>
-        [
-          error
-            ? `Robot stopped — ${error}`
-            : closed > 0
-              ? `Robot stopped — ${closed} open position${closed === 1 ? '' : 's'} closed at market. Open-positions panel cleared.`
-              : 'Robot stopped — no open positions to close.',
-          ...prev,
-        ].slice(0, 8),
-      )
+      pushLog([
+        error
+          ? `Robot stopped — ${error}`
+          : closed > 0
+            ? `Robot stopped — ${closed} open position${closed === 1 ? '' : 's'} closed at market. Open-positions panel cleared.`
+            : 'Robot stopped — no open positions to close.',
+      ])
     } finally {
       setStopping(false)
     }
@@ -459,16 +512,13 @@ export function Trading() {
           setRisk({ autoTrade: false })
           clearRunEnd(uid)
           void closeRobotPositions(ratesRef.current).then(({ closed, error }) => {
-            setRobotLog((prev) =>
-              [
-                error
-                  ? `Robot auto-run ended while you were away — trading paused, but ${error}`
-                  : closed > 0
-                    ? `Robot auto-run ended while you were away — trading paused, ${closed} robot position${closed === 1 ? '' : 's'} closed at market.`
-                    : 'Robot auto-run ended while you were away — trading paused, no open robot positions to close.',
-                ...prev,
-              ].slice(0, 8),
-            )
+            pushLog([
+              error
+                ? `Robot auto-run ended while you were away — trading paused, but ${error}`
+                : closed > 0
+                  ? `Robot auto-run ended while you were away — trading paused, ${closed} robot position${closed === 1 ? '' : 's'} closed at market.`
+                  : 'Robot auto-run ended while you were away — trading paused, no open robot positions to close.',
+            ])
           })
         } else {
           const end = Date.now() + prefs.durationMinutes * 60_000
@@ -509,16 +559,13 @@ export function Trading() {
         setEndsAt(null)
         setRemaining(null)
         void closeRobotPositions(ratesRef.current).then(({ closed, error }) => {
-          setRobotLog((prev) =>
-            [
-              error
-                ? `Robot auto-run finished — trading paused, but ${error}`
-                : closed > 0
-                  ? `Robot auto-run finished — trading paused, ${closed} robot position${closed === 1 ? '' : 's'} closed at market.`
-                  : 'Robot auto-run finished — trading paused, no open robot positions to close.',
-              ...prev,
-            ].slice(0, 8),
-          )
+          pushLog([
+            error
+              ? `Robot auto-run finished — trading paused, but ${error}`
+              : closed > 0
+                ? `Robot auto-run finished — trading paused, ${closed} robot position${closed === 1 ? '' : 's'} closed at market.`
+                : 'Robot auto-run finished — trading paused, no open robot positions to close.',
+          ])
         })
       }
     }
@@ -567,14 +614,11 @@ export function Trading() {
     sessionStartRef.current = null
     setSessionStart(null)
     void closeRobotPositions(rates).then(({ closed, error }) => {
-      setRobotLog((prev) =>
-        [
-          error
-            ? `Session guard hit the overall ${maxLoss ? 'max loss' : 'max profit'} (${formatUsd(maxLoss ? prefs.overallMaxLossUsd : prefs.overallMaxProfitUsd)}) at ${formatUsd(pnl)} — robot stopped, but ${error}`
-            : `Session guard hit the overall ${maxLoss ? 'max loss' : 'max profit'} (${formatUsd(maxLoss ? prefs.overallMaxLossUsd : prefs.overallMaxProfitUsd)}) at ${formatUsd(pnl)} — robot stopped, ${closed} robot position${closed === 1 ? '' : 's'} closed.`,
-          ...prev,
-        ].slice(0, 8),
-      )
+      pushLog([
+        error
+          ? `Session guard hit the overall ${maxLoss ? 'max loss' : 'max profit'} (${formatUsd(maxLoss ? prefs.overallMaxLossUsd : prefs.overallMaxProfitUsd)}) at ${formatUsd(pnl)} — robot stopped, but ${error}`
+          : `Session guard hit the overall ${maxLoss ? 'max loss' : 'max profit'} (${formatUsd(maxLoss ? prefs.overallMaxLossUsd : prefs.overallMaxProfitUsd)}) at ${formatUsd(pnl)} — robot stopped, ${closed} robot position${closed === 1 ? '' : 's'} closed.`,
+      ])
     })
   }, [account, autoTrade, rates, prefs.overallMaxLossUsd, prefs.overallMaxProfitUsd, closeRobotPositions, setRisk])
 
@@ -639,23 +683,29 @@ export function Trading() {
           setEndsAt(null)
           setRemaining(null)
         }
+        const lastTick = run.last_tick_at
         void closeRobotPositions(ratesRef.current).then(({ closed, error }) => {
-          setRobotLog((prev) =>
-            [
-              error
-                ? `Your robot's background run ended while you were away (${run.status === 'finished' ? 'it finished on schedule' : 'it was stopped'}) — trading paused${error ? `, but ${error}` : ''}.`
-                : closed > 0
-                  ? `Your robot's background run ended while you were away — trading paused, ${closed} open robot position${closed === 1 ? '' : 's'} closed at market.`
-                  : `Your robot's background run ended while you were away — trading paused.`,
-              ...prev,
-            ].slice(0, 8),
-          )
+          pushLog([
+            error
+              ? `Your robot's background run ended while you were away (${run.status === 'finished' ? 'it finished on schedule' : 'it was stopped'}) — trading paused${error ? `, but ${error}` : ''}.`
+              : closed > 0
+                ? `Your robot's background run ended while you were away — trading paused, ${closed} open robot position${closed === 1 ? '' : 's'} closed at market.`
+                : `Your robot's background run ended while you were away — trading paused.`,
+            ...(lastTick ? [`Its last activity was ${timeAgo(new Date(lastTick).getTime())}.`] : []),
+          ])
         })
         return
       }
       // Still running server-side: heartbeat so it stands down, then resume the
       // countdown / session baseline from the row when the local copy is gone.
       void heartbeatRobotRun(uid, accountId)
+      // The server ticked the run while the page was away — surface that the
+      // robot kept trading in the background so the feed tells the full story.
+      if (run.last_tick_at) {
+        pushLog([
+          `Resumed from the background — the robot kept trading while you were away (last activity ${timeAgo(new Date(run.last_tick_at).getTime())}).`,
+        ])
+      }
       if (run.ends_at) {
         const end = new Date(run.ends_at).getTime()
         if (end > Date.now() && endsAt == null) {
@@ -721,14 +771,11 @@ export function Trading() {
               ? ranked.slice(0, prefs.pairCount)
               : ranked
         if (prefs.autoPickPairs && targets.length > 0) {
-          setRobotLog((prev) =>
-            [
-              `Best analysis method picked ${targets.length} pair${targets.length === 1 ? '' : 's'}: ${targets
-                .map((t) => `${t.symbol} (${Math.round(t.score)}%)`)
-                .join(', ')}.`,
-              ...prev,
-            ].slice(0, 8),
-          )
+          pushLog([
+            `Best analysis method picked ${targets.length} pair${targets.length === 1 ? '' : 's'}: ${targets
+              .map((t) => `${t.symbol} (${Math.round(t.score)}%)`)
+              .join(', ')}.`,
+          ])
         }
 
         const cycleInputs: RobotCycleInput[] = []
@@ -745,12 +792,9 @@ export function Trading() {
           // Never enter on a stale price (weekend / feed stalled) — a
           // position opened at a price that isn't live can't be managed.
           if (staleSymbols.has(target.symbol)) {
-            setRobotLog((prev) =>
-              [
-                `Skipped ${target.symbol}: no live quote right now (market closed or feed stalled) — the robot only enters on a live price.`,
-                ...prev,
-              ].slice(0, 8),
-            )
+            pushLog([
+              `Skipped ${target.symbol}: no live quote right now (market closed or feed stalled) — the robot only enters on a live price.`,
+            ])
             continue
           }
 
@@ -762,12 +806,9 @@ export function Trading() {
             const lastAtr = atrSeries[atrSeries.length - 1] ?? 0
             const prevAtr = atrSeries[Math.max(0, atrSeries.length - 20)] ?? 0
             if (prevAtr > 0 && lastAtr > prevAtr * 1.5) {
-              setRobotLog((prev) =>
-                [
-                  `Skipped ${target.symbol}: volatility filter on and ATR is spiking — standing aside until the market settles.`,
-                  ...prev,
-                ].slice(0, 8),
-              )
+              pushLog([
+                `Skipped ${target.symbol}: volatility filter on and ATR is spiking — standing aside until the market settles.`,
+              ])
               continue
             }
           }
@@ -795,24 +836,18 @@ export function Trading() {
             pipValue,
           })
           if (units <= 0) {
-            setRobotLog((prev) =>
-              [
-                `Skipped ${target.symbol}: position size rounds to zero on this account — lower the stop or raise risk per trade.`,
-                ...prev,
-              ].slice(0, 8),
-            )
+            pushLog([
+              `Skipped ${target.symbol}: position size rounds to zero on this account — lower the stop or raise risk per trade.`,
+            ])
             continue
           }
 
           // Manual tune scales position size relative to the risk-based default.
           const scaledUnits = Math.round(units * tune.sizeMultiplier)
           if (scaledUnits <= 0) {
-            setRobotLog((prev) =>
-              [
-                `Skipped ${target.symbol}: manual tune scaled the position size to zero — raise the size multiplier.`,
-                ...prev,
-              ].slice(0, 8),
-            )
+            pushLog([
+              `Skipped ${target.symbol}: manual tune scaled the position size to zero — raise the size multiplier.`,
+            ])
             continue
           }
 
@@ -837,8 +872,8 @@ export function Trading() {
           }
           const { events } = await runCycle(cycleInputs, config)
           if (events.length) {
-            setRobotLog((prev) => [...events, ...prev].slice(0, 8))
-            setLastRun(Date.now())
+            pushLog(events)
+            noteRun()
           }
         }
       } finally {
@@ -882,12 +917,9 @@ export function Trading() {
     updateStrategy({ ...strategy, interval: methodInterval(m) })
     setRisk(methodRiskDefaults(m))
     setTuned(null)
-    setRobotLog((prev) =>
-      [
-        `Method set to ${methodLabel(m)} — interval ${intervalLabel(methodInterval(m))}, stops and risk adjusted.`,
-        ...prev,
-      ].slice(0, 8),
-    )
+    pushLog([
+      `Method set to ${methodLabel(m)} — interval ${intervalLabel(methodInterval(m))}, stops and risk adjusted.`,
+    ])
   }
 
   const runTune = async () => {
@@ -900,19 +932,19 @@ export function Trading() {
     })
     setTuning(false)
     if (res.kind !== 'ok' || !res.data || res.data.length < 30) {
-      setRobotLog((prev) => ['Auto-tune: not enough price data right now — try again shortly.', ...prev].slice(0, 8))
+      pushLog(['Auto-tune: not enough price data right now — try again shortly.'])
       return
     }
     const result = autoTune(res.data, strategy.type, strategy.params)
     if (!result) {
-      setRobotLog((prev) => ['Auto-tune: no parameter set beat the current one.', ...prev].slice(0, 8))
+      pushLog(['Auto-tune: no parameter set beat the current one.'])
       return
     }
     updateStrategy({ ...strategy, params: result.params })
     setTuned(result)
-    setRobotLog((prev) =>
-      [`Auto-tune picked ${STRATEGY_META[strategy.type].shortLabel} parameters (${result.profitFactor.toFixed(2)} profit factor).`, ...prev].slice(0, 8),
-    )
+    pushLog([
+      `Auto-tune picked ${STRATEGY_META[strategy.type].shortLabel} parameters (${result.profitFactor.toFixed(2)} profit factor).`,
+    ])
   }
 
   const applyManualTune = () => {
@@ -927,20 +959,15 @@ export function Trading() {
     })
     setTuneApplied(true)
     setTuned(null)
-    setRobotLog((prev) =>
-      [
-        `Manual tune applied — ${aggressivenessLabel(tune.aggressiveness)} profile, ~${tune.targetProfitPct}% target per run, ${tune.sizeMultiplier}× position size (guardrails: ${guardrailLabel(tune)}).`,
-        ...prev,
-      ].slice(0, 8),
-    )
+    pushLog([
+      `Manual tune applied — ${aggressivenessLabel(tune.aggressiveness)} profile, ~${tune.targetProfitPct}% target per run, ${tune.sizeMultiplier}× position size (guardrails: ${guardrailLabel(tune)}).`,
+    ])
     setShowManualTune(false)
   }
 
   const guardedSetRisk = (patch: Parameters<typeof setRisk>[0]) => {
     if (patch.autoTrade === true && needsRiskAccept) {
-      setRobotLog((prev) =>
-        ['Accept the risk disclaimer first — managed live auto-trading stays locked until you do.', ...prev].slice(0, 8),
-      )
+      pushLog(['Accept the risk disclaimer first — managed live auto-trading stays locked until you do.'])
       return
     }
     if (patch.autoTrade === true && !canRunRobot) return
@@ -963,11 +990,11 @@ export function Trading() {
     if (!user) return
     const err = await acceptRisk(user.id)
     if (err) {
-      setRobotLog((prev) => ["We couldn't save your risk acceptance — try again.", ...prev].slice(0, 8))
+      pushLog(["We couldn't save your risk acceptance — try again."])
       return
     }
     await refreshProfile()
-    setRobotLog((prev) => ['Risk disclaimer accepted — managed live auto-trading is unlocked.', ...prev].slice(0, 8))
+    pushLog(['Risk disclaimer accepted — managed live auto-trading is unlocked.'])
   }
 
   const riskGate =
@@ -1517,8 +1544,12 @@ export function Trading() {
         {robotLog.length > 0 && (
           <ul className="mt-4 space-y-1.5">
             {robotLog.map((e, i) => (
-              <li key={`${i}-${e}`} className="rounded-md bg-muted/40 px-3 py-1.5 font-mono text-xs tnum">
-                {e}
+              <li
+                key={`${i}-${e.t}`}
+                className="flex items-start gap-2 rounded-md bg-muted/40 px-3 py-1.5 font-mono text-xs tnum"
+              >
+                <span className="shrink-0 whitespace-nowrap text-muted-foreground">{timeAgo(e.t)}</span>
+                <span>{e.m}</span>
               </li>
             ))}
           </ul>
@@ -1539,7 +1570,7 @@ export function Trading() {
         <RiskPanel
           risk={acc.risk}
           onChange={guardedSetRisk}
-          onReset={() => reset(acc.initialBalance)}
+          onReset={() => handleReset(acc.initialBalance)}
           isLive={mode !== 'paper'}
         />
         <div className="space-y-6 lg:col-span-2">
