@@ -63,6 +63,8 @@
  *   close-position  -> close one open position by MetaApi position id.
  */
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { resolveTokenWithFallback } from "./tokenFallback.ts";
+import type { MetaTokenSource } from "./tokenFallback.ts";
 
 /**
  * MetaApi serves its REST API from two separate hosts:
