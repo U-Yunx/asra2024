@@ -412,6 +412,10 @@ export interface MetaApiBridgeConfig {
   generalTokenConfigured: boolean
   /** Masked preview of the general token (first 6 + last 4 chars), or null. */
   generalTokenMasked: string | null
+  /** Whether a just-saved general token passed MetaApi's live validation. */
+  valid?: boolean
+  /** Human note from the last token save (e.g. the MetaApi validation result). */
+  note?: string
   error?: string
 }
 

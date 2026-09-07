@@ -702,6 +702,28 @@ export async function saveMetaApiMode(mode: 'user' | 'general'): Promise<{ data:
   })
 }
 
+/**
+ * Admin: replace the general METAAPI_TOKEN secret. The token is POSTed to the
+ * broker-mt Edge Function over HTTPS and stored in the project's Edge Function
+ * secrets via the Supabase Management API — it is never written to the database
+ * and never kept in the browser after this call. The function validates it live
+ * against MetaApi and returns only a masked preview + verdict.
+ */
+export async function saveGeneralMetaApiToken(token: string): Promise<{ data: MetaApiBridgeConfig | null; error: string | null }> {
+  return fn<MetaApiBridgeConfig>('broker-mt', {
+    body: { action: 'metaapi-token-set', token },
+    fallback: 'Could not save the general MetaApi token.',
+  })
+}
+
+/** Admin: remove the general METAAPI_TOKEN secret so general-mode live trading stops. */
+export async function clearGeneralMetaApiToken(): Promise<{ data: MetaApiBridgeConfig | null; error: string | null }> {
+  return fn<MetaApiBridgeConfig>('broker-mt', {
+    body: { action: 'metaapi-token-clear' },
+    fallback: 'Could not remove the general MetaApi token.',
+  })
+}
+
 /* --------------------------------- settings -------------------------------- */
 
 export async function fetchSettings(): Promise<SettingsRow[]> {

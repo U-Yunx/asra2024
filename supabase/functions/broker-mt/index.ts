@@ -15,9 +15,14 @@
  *                           token as fallback;
  *   - 'general'            — ONLY the general `METAAPI_TOKEN` secret; per-user
  *                           tokens are ignored (never decrypted/used).
- * Admins switch the mode and read the bridge config through the admin-only
- * actions `metaapi-mode-set` / `metaapi-config`. The general token itself is
- * set as an Edge Function secret — it is never stored in the database.
+ * Admins switch the mode, read the bridge config, and set/clear the general
+ * token through the admin-only actions `metaapi-mode-set` / `metaapi-config` /
+ * `metaapi-token-set` / `metaapi-token-clear`. The general token itself is an
+ * Edge Function secret (METAAPI_TOKEN) — it is never stored in the database.
+ * Admins set it from the Admin panel, which POSTs the token here over HTTPS;
+ * this function stores it in the project's Edge Function secrets via the
+ * Supabase Management API (scoped PAT in SUPABASE_ACCESS_TOKEN) and validates
+ * it live against MetaApi. The raw token never reaches the browser afterwards.
  *
  * The MT account credentials (login / password / server) come from the user's
  * saved `broker_connections` row (platform = 'mt4' | 'mt5'), so neither the
@@ -42,10 +47,13 @@
  *   metaapi-activate-> security-pass gate, then provision + deploy the account
  *                      and mark the connection live-trading active.
  *   metaapi-remove  -> clear the user's saved MetaApi token + activation state.
- *   metaapi-config  -> ADMIN ONLY: read the token mode + whether the general
- *                      METAAPI_TOKEN secret is set (masked only).
- *   metaapi-mode-set-> ADMIN ONLY: switch between per-user tokens and the
- *                      general platform token.
+ *   metaapi-config    -> ADMIN ONLY: read the token mode + whether the general
+ *                        METAAPI_TOKEN secret is set (masked only).
+ *   metaapi-mode-set  -> ADMIN ONLY: switch between per-user tokens and the
+ *                        general platform token.
+ *   metaapi-token-set -> ADMIN ONLY: replace the general METAAPI_TOKEN secret
+ *                        (via the Management API) and validate it live.
+ *   metaapi-token-clear-> ADMIN ONLY: remove the general METAAPI_TOKEN secret.
  *   state           -> deployment + connection status of the MetaApi account.
  *   summary         -> account-information (balance, equity, currency).
  *   open-trades     -> open positions (the robot's live positions).
@@ -183,6 +191,61 @@ function mask(token: string): string | null {
   if (!token) return null;
   if (token.length <= 12) return `${token.slice(0, 3)}…`;
   return `${token.slice(0, 6)}…${token.slice(-4)}`;
+}
+
+/**
+ * Supabase Management API — used by the admin-only `metaapi-token-set` /
+ * `metaapi-token-clear` actions to write the general METAAPI_TOKEN secret.
+ * The management token (a scoped PAT with "Edge Function Secrets" write) is
+ * itself an Edge Function secret (SUPABASE_ACCESS_TOKEN), never a VITE_ var.
+ * The project ref is derived from SUPABASE_URL, which the runtime injects.
+ */
+const MANAGEMENT_API = "https://api.supabase.com/v1/projects";
+
+function projectRefFromEnv(): string | null {
+  const url = Deno.env.get("SUPABASE_URL") ?? "";
+  try {
+    const ref = new URL(url).hostname.split(".")[0];
+    return /^[a-z0-9]{20}$/.test(ref) ? ref : null;
+  } catch {
+    return null;
+  }
+}
+
+async function managementApiSecretWrite(
+  method: "POST" | "DELETE",
+  payload: unknown,
+): Promise<{ ok: boolean; error: string | null }> {
+  const pat = Deno.env.get("SUPABASE_ACCESS_TOKEN")?.trim() ?? "";
+  if (!pat) {
+    return {
+      ok: false,
+      error: "The server has no SUPABASE_ACCESS_TOKEN secret. Add one (a scoped PAT with “Edge Function Secrets” write) so the admin panel can store the MetaApi token.",
+    };
+  }
+  const ref = projectRefFromEnv();
+  if (!ref) {
+    return { ok: false, error: "Could not determine the project ref from SUPABASE_URL." };
+  }
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(`${MANAGEMENT_API}/${ref}/secrets`, {
+      method,
+      headers: { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }, 20_000);
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Could not reach the Supabase Management API: ${cause}` };
+  }
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
+    return {
+      ok: false,
+      error: data.message ?? data.error ?? `The Management API rejected the request (HTTP ${res.status}). Check that the SUPABASE_ACCESS_TOKEN has “Edge Function Secrets” write permission.`,
+    };
+  }
+  return { ok: true, error: null };
 }
 
 /** Minimal user shape we expose from `GET /users/current` (never the token). */
@@ -347,11 +410,16 @@ Deno.serve(async (req: Request) => {
   }
 
   // ---- Admin-only bridge configuration (no broker connection required) ----
-  //   metaapi-config   -> read the current token mode + whether the general
-  //                       METAAPI_TOKEN secret is set (masked only).
-  //   metaapi-mode-set -> switch between per-user tokens and the general token.
-  // Both are server-authoritative: the caller must be an admin in `profiles`.
-  if (action === "metaapi-config" || action === "metaapi-mode-set") {
+  //   metaapi-config     -> read the current token mode + whether the general
+  //                         METAAPI_TOKEN secret is set (masked only).
+  //   metaapi-mode-set   -> switch between per-user tokens and the general token.
+  //   metaapi-token-set  -> replace the general METAAPI_TOKEN secret (Management
+  //                         API) and validate it live against MetaApi.
+  //   metaapi-token-clear-> remove the general METAAPI_TOKEN secret.
+  // All four are server-authoritative: the caller must be an admin in `profiles`,
+  // and the raw token is only ever masked in responses — never stored in the DB.
+  if (action === "metaapi-config" || action === "metaapi-mode-set" ||
+      action === "metaapi-token-set" || action === "metaapi-token-clear") {
     const admin = await isAdmin(supabase, user.id);
     if (!admin) return json({ ok: false, error: "Admins only." }, 403);
     const tokenMode = await loadMetaApiTokenMode(supabase);
@@ -362,6 +430,38 @@ Deno.serve(async (req: Request) => {
         mode: tokenMode,
         generalTokenConfigured: !!platformSecret,
         generalTokenMasked: mask(platformSecret) ?? null,
+      });
+    }
+    if (action === "metaapi-token-set") {
+      const newToken = String(body.token ?? "").trim();
+      if (newToken.length < 20) {
+        return json({ ok: false, error: "That doesn't look like a MetaApi API token (it should be at least 20 characters, from metaapi.cloud)." }, 400);
+      }
+      const saved = await managementApiSecretWrite("POST", [{ name: "METAAPI_TOKEN", value: newToken }]);
+      if (!saved.ok) return json({ ok: false, error: saved.error }, 502);
+      // Validate the saved token live so a typo'd or revoked token is caught
+      // the moment the admin saves it (it is already the live secret either way).
+      const validation = await validateMetaApiToken(newToken);
+      return json({
+        ok: true,
+        mode: tokenMode,
+        generalTokenConfigured: true,
+        generalTokenMasked: mask(newToken) ?? null,
+        valid: validation.ok,
+        note: validation.ok
+          ? `General MetaApi token saved ✓ — MetaApi accepted it${validation.user?.email ? ` (${validation.user.email})` : ""}. The bridge now trades through this token in general mode.`
+          : `Token saved, but MetaApi rejected it: ${validation.error} — live trading with it will fail the security pass. Save the correct token or clear this one.`,
+      });
+    }
+    if (action === "metaapi-token-clear") {
+      const cleared = await managementApiSecretWrite("DELETE", ["METAAPI_TOKEN"]);
+      if (!cleared.ok) return json({ ok: false, error: cleared.error }, 502);
+      return json({
+        ok: true,
+        mode: tokenMode,
+        generalTokenConfigured: false,
+        generalTokenMasked: null,
+        note: "General MetaApi token removed — the platform token is cleared. Live trading via the general token is disabled until a new one is saved.",
       });
     }
     const nextMode = String(body.mode ?? "").trim();

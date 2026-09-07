@@ -66,6 +66,8 @@ import {
   activateFreeMarketData,
   fetchMetaApiConfig,
   saveMetaApiMode,
+  saveGeneralMetaApiToken,
+  clearGeneralMetaApiToken,
 } from '../lib/platform'
 import { PAYMENT_METHOD_LABEL } from '../lib/paymentMethods'
 import type {
@@ -1717,16 +1719,24 @@ function SettingsTab() {
  * Admin: choose which MetaApi token the MT4/5 bridge trades through —
  * each user's own token ('user') or the platform's general token ('general').
  * The mode lives in `settings.metaapi_token_mode` and is enforced server-side
- * by broker-mt (non-admins get a 403 from `metaapi-config`/`metaapi-mode-set`).
- * The general token itself is a Supabase Edge Function secret (METAAPI_TOKEN),
- * never stored in the database or shown in the browser — this panel only shows
- * whether it is configured plus a masked preview.
+ * by broker-mt (non-admins get a 403 from every metaapi-* admin action).
+ *
+ * The general token is a Supabase Edge Function secret (METAAPI_TOKEN), never
+ * stored in the database or shown in the browser. The input box below POSTs the
+ * token to broker-mt over HTTPS; the function stores it in the project's Edge
+ * Function secrets via the Management API and validates it live against MetaApi.
+ * This panel only ever receives back a masked preview + the validation verdict.
  */
 function MetaApiBridgeEditor() {
   const [config, setConfig] = useState<MetaApiBridgeConfig | null>(null)
   const [mode, setMode] = useState<'user' | 'general'>('user')
+  const [token, setToken] = useState('')
+  const [showToken, setShowToken] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [savingToken, setSavingToken] = useState(false)
+  const [clearing, setClearing] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
@@ -1762,10 +1772,53 @@ function MetaApiBridgeEditor() {
     setTimeout(() => setMsg(null), 2500)
   }
 
+  const saveToken = async () => {
+    const t = token.trim()
+    if (t.length < 20) {
+      setErr("That doesn't look like a MetaApi API token — it should be at least 20 characters from metaapi.cloud.")
+      setMsg(null)
+      return
+    }
+    setErr(null)
+    setMsg(null)
+    setSavingToken(true)
+    const res = await saveGeneralMetaApiToken(t)
+    setSavingToken(false)
+    if (res.error) {
+      setErr(res.error)
+      return
+    }
+    if (res.data) setConfig(res.data)
+    setToken('')
+    setMsg(res.data?.note ?? 'General MetaApi token saved ✓')
+    setTimeout(() => setMsg(null), 5000)
+  }
+
+  const clearToken = async () => {
+    if (!confirmClear) {
+      setConfirmClear(true)
+      setTimeout(() => setConfirmClear(false), 4000)
+      return
+    }
+    setConfirmClear(false)
+    setErr(null)
+    setMsg(null)
+    setClearing(true)
+    const res = await clearGeneralMetaApiToken()
+    setClearing(false)
+    if (res.error) {
+      setErr(res.error)
+      return
+    }
+    if (res.data) setConfig(res.data)
+    setMsg(res.data?.note ?? 'General MetaApi token removed.')
+    setTimeout(() => setMsg(null), 5000)
+  }
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>MetaTrader bridge — MetaApi token mode</CardTitle>
+        <CardTitle>MetaTrader bridge — MetaApi token</CardTitle>
         <Badge className="border-border bg-muted text-muted-foreground">Live trading through MetaApi (MT4/5)</Badge>
       </CardHeader>
       <CardContent>
@@ -1775,33 +1828,62 @@ function MetaApiBridgeEditor() {
             <option value="general">General platform token (single token for all connections)</option>
           </Select>
 
-          <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-secondary/40 px-4 py-3">
-            <div className="flex min-w-0 items-center gap-3">
-              <KeyRound className="h-5 w-5 shrink-0 text-accent" aria-hidden="true" />
-              <div className="min-w-0">
-                <p className="font-medium">General MetaApi token (METAAPI_TOKEN)</p>
-                <p className="text-xs text-muted-foreground">
-                  {loading
-                    ? 'checking…'
-                    : config?.generalTokenConfigured
-                      ? `Configured — ${config.generalTokenMasked ?? 'masked preview unavailable'}`
-                      : 'Not set — live trading via the general token is unavailable until it is added.'}
-                </p>
-              </div>
-            </div>
-            <Badge className={config?.generalTokenConfigured ? 'border-up/40 bg-up/10 text-up' : 'border-amber/40 bg-amber/10 text-amber'}>
-              {loading ? '…' : config?.generalTokenConfigured ? 'Configured' : 'Missing'}
-            </Badge>
+          <div className="rounded-lg border border-border bg-secondary/40 px-4 py-3">
+            <p className="text-sm font-medium">General MetaApi token (METAAPI_TOKEN)</p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {loading
+                ? 'checking…'
+                : config?.generalTokenConfigured
+                  ? `Configured — ${config.generalTokenMasked ?? 'masked preview unavailable'}.`
+                  : 'Not set — general-mode live trading is unavailable until a token is saved below.'}
+            </p>
+            {config?.generalTokenConfigured && (
+              <Badge className="mt-2 border-up/40 bg-up/10 text-up">Configured</Badge>
+            )}
+            {!config?.generalTokenConfigured && !loading && (
+              <Badge className="mt-2 border-amber/40 bg-amber/10 text-amber">Missing</Badge>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <Input
+              label="Paste a MetaApi API token to set or replace it"
+              type={showToken ? 'text' : 'password'}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={config?.generalTokenConfigured ? 'Paste a new token to replace the current one' : 'Paste the platform MetaApi token from metaapi.cloud'}
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              className="flex-1"
+            />
+            <label className="flex cursor-pointer items-end gap-1.5 pb-2 text-sm text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showToken}
+                onChange={(e) => setShowToken(e.target.checked)}
+                className="h-4 w-4 cursor-pointer accent-emerald-500"
+              />
+              Show
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => void saveToken()} loading={savingToken} disabled={!token.trim()}>
+              {config?.generalTokenConfigured ? 'Replace MetaApi token' : 'Save MetaApi token'}
+            </Button>
+            {config?.generalTokenConfigured && (
+              <Button variant={confirmClear ? 'danger' : 'secondary'} onClick={() => void clearToken()} loading={clearing}>
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                {confirmClear ? 'Click again to remove' : 'Remove token'}
+              </Button>
+            )}
+            <Button variant="ghost" onClick={() => void save()} loading={saving} disabled={loading || mode === config?.mode}>
+              Save token mode
+            </Button>
           </div>
 
           {msg && <p className="text-sm text-up">{msg}</p>}
           {err && <p className="text-sm text-red-200">{err}</p>}
-
-          <div>
-            <Button onClick={() => void save()} loading={saving} disabled={loading || mode === config?.mode}>
-              Save token mode
-            </Button>
-          </div>
 
           <p className="text-xs text-muted-foreground">
             <strong className="text-foreground">Per-user tokens:</strong> each user pastes their own free MetaApi token on
@@ -1811,9 +1893,10 @@ function MetaApiBridgeEditor() {
             gates activation in both modes — a revoked or invalid token can never activate live trading.
           </p>
           <p className="text-xs text-muted-foreground">
-            The general token itself is a server secret: set or replace it with the secure secret input (key{' '}
-            <code className="rounded bg-muted px-1 py-0.5 font-mono">METAAPI_TOKEN</code>) — it is never stored in the
-            database and never reaches the browser, exactly like per-user tokens.
+            Saving a token sends it straight to the server over HTTPS: broker-mt stores it as an Edge Function secret
+            through the Supabase Management API (scoped PAT in <code className="rounded bg-muted px-1 py-0.5 font-mono">SUPABASE_ACCESS_TOKEN</code>)
+            and validates it live against MetaApi. It is never written to the database and never kept in the browser —
+            the panel only shows a masked preview, exactly like per-user tokens.
           </p>
         </div>
       </CardContent>
