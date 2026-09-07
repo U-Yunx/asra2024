@@ -27,6 +27,16 @@ export interface TokenCandidate {
   source: MetaTokenSource;
 }
 
+/** Token availability facts — everything the resolver needs except the check. */
+export interface TokenCandidateOptions {
+  /** Admin-selected token mode (defaults to 'user' when unset). */
+  mode: MetaTokenMode;
+  /** The user's own MetaApi token, decrypted, or null when they never saved one. */
+  userToken: string | null;
+  /** The platform-wide METAAPI_TOKEN secret, or null when unset. */
+  platformToken: string | null;
+}
+
 /**
  * The input to the fallback resolver.
  *
@@ -34,13 +44,7 @@ export interface TokenCandidate {
  * live MetaApi validation (or a stub in tests). It must resolve the token
  * against the MetaApi provisioning API and report whether MetaApi accepts it.
  */
-export interface ResolveTokenContext {
-  /** Admin-selected token mode (defaults to 'user' when unset). */
-  mode: MetaTokenMode;
-  /** The user's own MetaApi token, decrypted, or null when they never saved one. */
-  userToken: string | null;
-  /** The platform-wide METAAPI_TOKEN secret, or null when unset. */
-  platformToken: string | null;
+export interface ResolveTokenContext extends TokenCandidateOptions {
   check: (token: string) => Promise<{ ok: boolean; reason?: string }>;
 }
 
@@ -57,12 +61,30 @@ export interface ResolveTokenResult {
    * failure to report).
    */
   fallbackReason: string | null;
+  /** The candidate list actually probed, in priority order (for callers and tests). */
+  candidates: TokenCandidate[];
 }
 
 /** The MetaApi validation failure reason for a candidate, human-readable. */
 function failureReason(source: MetaTokenSource, reason?: string): string {
   const label = source === "user" ? "your saved MetaApi token" : "the platform METAAPI_TOKEN secret";
   return reason ? `${label}: ${reason}` : `${label} was rejected by MetaApi`;
+}
+
+/**
+ * The ordered candidate list the resolver probes in priority order:
+ *  - mode 'user'    → the user's own token first, platform token second;
+ *  - mode 'general' → the platform token only (per-user tokens are ignored).
+ */
+export function metaTokenCandidates(o: TokenCandidateOptions): TokenCandidate[] {
+  const candidates: TokenCandidate[] = [];
+  if (o.mode === "general") {
+    if (o.platformToken) candidates.push({ token: o.platformToken, source: "general" });
+  } else {
+    if (o.userToken) candidates.push({ token: o.userToken, source: "user" });
+    if (o.platformToken) candidates.push({ token: o.platformToken, source: "general" });
+  }
+  return candidates;
 }
 
 /**
@@ -78,17 +100,11 @@ function failureReason(source: MetaTokenSource, reason?: string): string {
  * wins; `fallbackReason` is the rejection reason of the earlier candidate when
  * a fallback occurred, and null otherwise.
  */
-export async function resolveTokenWithFallback(input: ResolveTokenInput): Promise<ResolveTokenResult> {
-  const candidates: TokenCandidate[] = [];
-  if (input.mode === "general") {
-    if (input.platformToken) candidates.push({ token: input.platformToken, source: "general" });
-  } else {
-    if (input.userToken) candidates.push({ token: input.userToken, source: "user" });
-    if (input.platformToken) candidates.push({ token: input.platformToken, source: "general" });
-  }
+export async function resolveTokenWithFallback(input: ResolveTokenContext): Promise<ResolveTokenResult> {
+  const candidates = metaTokenCandidates(input);
 
   if (candidates.length === 0) {
-    return { token: null, source: null, fallbackReason: null };
+    return { token: null, source: null, fallbackReason: null, candidates };
   }
 
   let firstFailure: string | null = null;
@@ -97,12 +113,12 @@ export async function resolveTokenWithFallback(input: ResolveTokenInput): Promis
     if (verdict.ok) {
       // A fallback fired only when a HIGHER-priority candidate existed and was
       // attempted but rejected — never when the user just has no token yet.
-      return { token: candidate.token, source: candidate.source, fallbackReason: firstFailure };
+      return { token: candidate.token, source: candidate.source, fallbackReason: firstFailure, candidates };
     }
     if (firstFailure === null) {
       firstFailure = failureReason(candidate.source, verdict.reason);
     }
   }
   // Every candidate was unusable — the caller surfaces the last reason.
-  return { token: null, source: null, fallbackReason: firstFailure };
+  return { token: null, source: null, fallbackReason: firstFailure, candidates };
 }

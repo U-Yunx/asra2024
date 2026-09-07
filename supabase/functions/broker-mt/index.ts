@@ -407,6 +407,43 @@ interface MtConnection {
   metaapi_active_at: string | null;
 }
 
+/**
+ * Notify the admins that a user's own MetaApi token failed and the bridge
+ * automatically switched to the platform-wide METAAPI_TOKEN secret so the
+ * robot kept trading without a user-visible error. Broadcasts are
+ * `user_id = null`, which the notifications policy shows to admins only.
+ * Deduplicated: one row per user per 24h, so a broken token never spams the
+ * admin feed. Best-effort — a notification hiccup must never fail a trade.
+ */
+async function notifyMetaFallback(
+  supabase: any,
+  userId: string,
+  email: string | undefined,
+  reason: string,
+): Promise<void> {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count } = await supabase
+      .from("notifications")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", null)
+      .eq("type", "warning")
+      .eq("title", "MetaApi token fallback")
+      .ilike("body", `%${userId}%`)
+      .gte("created_at", since);
+    if (count && count > 0) return; // already reported this window
+    await supabase.from("notifications").insert({
+      user_id: null,
+      type: "warning",
+      title: "MetaApi token fallback",
+      body: `User ${email || userId} (${userId}): ${reason} The robot is running on the platform's MetaApi token — no error was shown to the user.`,
+      link: "/admin",
+    });
+  } catch {
+    /* notification is best-effort — never break a trade over it */
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (!["GET", "POST", "PUT"].includes(req.method)) {
@@ -568,6 +605,16 @@ Deno.serve(async (req: Request) => {
    *                           user's saved token (if any) is ignored.
    * The user's token is decrypted server-side; neither token ever reaches the
    * browser.
+   *
+   * AUTOMATIC RUNTIME FALLBACK: for robot/trading actions the user's own token
+   * is live-validated and used when MetaApi accepts it. When MetaApi rejects
+   * it (revoked / invalid / throttled / unreachable) the bridge silently
+   * switches to the platform-wide METAAPI_TOKEN secret so the robot keeps
+   * running — the user is never shown an error, and the admins get ONE
+   * notification per user per day instead. Diagnostic actions (metaapi-status,
+   * metaapi-check) resolve honestly so the Brokers page shows the true state
+   * of the USER's token; metaapi-save / metaapi-remove never hard-fail on a
+   * broken saved token (the user must always be able to replace or remove it).
    */
   const tokenMode = await loadMetaApiTokenMode(supabase);
   const platformSecret = await loadPlatformSecret(supabase);
@@ -579,17 +626,46 @@ Deno.serve(async (req: Request) => {
     }
     userToken = dec ? String(dec).trim() : null;
   }
+
+  /** Actions that must report the truth about the USER's own token (no silent
+   *  switch) and actions that never need the resolved token at all. */
+  const tokenDiagnosticAction = action === "metaapi-status" || action === "metaapi-check";
+  const tokenFreeAction = action === "metaapi-save" || action === "metaapi-remove";
+
   let metaApiToken: string | null;
-  let tokenSource: "user" | "general" | null;
+  let tokenSource: MetaTokenSource | null;
+  /** Set when the user's own token failed live validation and the bridge moved
+   *  to the platform token (or found nothing) — drives the admin notification. */
+  let tokenFallbackReason: string | null = null;
+
   if (tokenMode === "general") {
     metaApiToken = platformSecret || null;
     tokenSource = platformSecret ? "general" : null;
-  } else {
+  } else if (tokenDiagnosticAction || !userToken || tokenFreeAction) {
+    // Classic resolution: the user's own token first, platform token as the
+    // pre-set fallback. No live probing — token-free actions must never be
+    // blocked by a broken saved token, and diagnostics must show the truth.
     metaApiToken = userToken ?? (platformSecret || null);
     tokenSource = userToken ? "user" : platformSecret ? "general" : null;
+  } else {
+    // Robot/trading action with a user's own token: try it FIRST, and when
+    // MetaApi rejects it switch automatically to the platform token so the
+    // robot keeps working — the user sees no error, admins get notified.
+    const resolved = await resolveTokenWithFallback({
+      mode: "user",
+      userToken,
+      platformToken: platformSecret,
+      check: async (candidate) => {
+        const validation = await validateMetaApiToken(candidate);
+        return { ok: validation.ok, reason: validation.error ?? undefined };
+      },
+    });
+    metaApiToken = resolved.token;
+    tokenSource = resolved.source;
+    tokenFallbackReason = resolved.fallbackReason;
   }
 
-  if (!metaApiToken) {
+  if (!metaApiToken && !tokenFreeAction) {
     return json({
       ok: false,
       error: tokenMode === "general"
@@ -597,7 +673,14 @@ Deno.serve(async (req: Request) => {
         : "No MetaApi token available for live trading. Add your own free MetaApi token on the Brokers page (or ask the admin to set the METAAPI_TOKEN secret).",
     }, 503);
   }
-  const metaHeaders = { "auth-token": metaApiToken, "Content-Type": "application/json" };
+  const metaHeaders = { "auth-token": metaApiToken as string, "Content-Type": "application/json" };
+
+  // The user HAS a saved token but the bridge silently moved to the platform
+  // token so the robot could keep trading: notify the admins (one per day),
+  // never surface an error to the user.
+  if (tokenFallbackReason && userToken && !tokenFreeAction) {
+    await notifyMetaFallback(supabase, user.id, (user as { email?: string }).email, tokenFallbackReason);
+  }
 
   /**
    * Run the SECURITY PASS for a token against this connection's MT account:
