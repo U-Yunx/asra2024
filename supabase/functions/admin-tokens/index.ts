@@ -4,11 +4,14 @@
 // Flow: an admin pastes a token on the Configuration page. This function
 // verifies the caller's JWT + admin role, live-validates the token against its
 // provider (best-effort, non-blocking), and writes it to the project's Edge
-// Function secrets through the Supabase Management API (needs the
-// SUPABASE_ACCESS_TOKEN secret — a scoped PAT with "Edge Function Secrets"
-// read-write). The app's own Edge Functions then read the secret via
-// Deno.env.get() at runtime — that is the "inject to the app" step, no
-// redeploy required.
+// Function secrets through the Supabase Management API. Writing needs a
+// SUPABASE_ACCESS_TOKEN (a scoped PAT with "Edge Function Secrets" read-write).
+// Bootstrap: the master token itself can be pasted on the Configuration page —
+// when the incoming token IS SUPABASE_ACCESS_TOKEN, the value being saved is
+// used as the bearer credential for the Management API call, so the very first
+// token can be injected with no pre-existing secret. The app's own Edge
+// Functions then read secrets via Deno.env.get() at runtime — that is the
+// "inject to the app" step, no redeploy required.
 //
 // Security guarantees:
 //  - Token values NEVER enter the database and NEVER leave this function.
@@ -48,6 +51,27 @@ function projectRef(): string | null {
 type Validator = (value: string) => Promise<string | null>;
 
 const VALIDATORS: Record<string, { label: string; validate: Validator }> = {
+  SUPABASE_ACCESS_TOKEN: {
+    label: "Supabase access token",
+    validate: async (v) => {
+      const ref = projectRef();
+      if (!ref) return "Could not determine this project's ref — saved without a live check.";
+      try {
+        const res = await fetch(`${MANAGEMENT_API}/${ref}/secrets`, {
+          headers: { Authorization: `Bearer ${v}` },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.ok) return null;
+        if (res.status === 401) return "Supabase rejected the token (HTTP 401) — check it was copied in full.";
+        if (res.status === 403) {
+          return "The token is valid but lacks the “Edge Function Secrets” read-write scope — add that scope on the Access Tokens page, otherwise saving other tokens will fail.";
+        }
+        return `Supabase rejected the token (HTTP ${res.status}).`;
+      } catch {
+        return "Could not reach the Supabase Management API to validate — saved without a live check.";
+      }
+    },
+  },
   METAAPI_TOKEN: {
     label: "MetaApi",
     validate: async (v) => {
@@ -152,8 +176,12 @@ function mask(value: string): string {
 async function managementApiSecrets(
   method: "POST" | "DELETE",
   payload: unknown,
+  patOverride?: string,
 ): Promise<{ ok: boolean; error: string | null }> {
-  const pat = Deno.env.get("SUPABASE_ACCESS_TOKEN")?.trim() ?? "";
+  // Bootstrap: when the incoming token IS the master key, use the value being
+  // saved as the credential so the very first token can be injected without a
+  // pre-existing secret. Otherwise fall back to the stored one.
+  const pat = (patOverride ?? Deno.env.get("SUPABASE_ACCESS_TOKEN"))?.trim() ?? "";
   if (!pat) {
     return {
       ok: false,
@@ -246,7 +274,15 @@ Deno.serve(async (req: Request) => {
     }
 
     const verdicts = await Promise.all(queue.map((t) => VALIDATORS[t.name].validate(t.value)));
-    const writes = await Promise.all(queue.map((t) => managementApiSecrets("POST", [{ name: t.name, value: t.value }])));
+    const writes = await Promise.all(
+      queue.map((t) =>
+        managementApiSecrets(
+          "POST",
+          [{ name: t.name, value: t.value }],
+          t.name === "SUPABASE_ACCESS_TOKEN" ? t.value : undefined,
+        ),
+      ),
+    );
 
     queue.forEach((t, i) => {
       const verdict = verdicts[i];

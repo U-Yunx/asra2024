@@ -15,10 +15,23 @@ export interface TokenDef {
   description: string
   /** Where the admin gets the token. */
   signupUrl: string
+  /** Master key that unlocks saving every other token — highlighted in the UI. */
+  master?: boolean
+  /** When false the UI offers replace-only (no delete) — rotation happens by pasting a new value. */
+  canClear?: boolean
 }
 
 /** Every third-party token the app's Edge Functions read via Deno.env.get. */
 export const TOKEN_DEFS: TokenDef[] = [
+  {
+    name: 'SUPABASE_ACCESS_TOKEN',
+    label: 'Supabase access token',
+    description:
+      'Master key — a Personal Access Token (sbp_…) with "Edge Function Secrets" read-write scope for this project. Powers secure storage of every other token on this page.',
+    signupUrl: 'https://supabase.com/dashboard/account/tokens',
+    master: true,
+    canClear: false,
+  },
   {
     name: 'METAAPI_TOKEN',
     label: 'MetaApi',

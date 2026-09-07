@@ -221,6 +221,17 @@ export function ApiTokensCard() {
           </span>
         </div>
 
+        {!loading && !statuses.SUPABASE_ACCESS_TOKEN?.configured && (
+          <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber/40 bg-amber/10 px-3 py-2.5 text-xs leading-relaxed text-amber">
+            <KeyRound className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>
+              <span className="font-medium">Add the Supabase access token first.</span> It is the master key that
+              lets the app store every other token on this page. Paste a Personal Access Token (sbp_…) with
+              &ldquo;Edge Function Secrets&rdquo; read-write scope below and save — everything else unlocks.
+            </span>
+          </div>
+        )}
+
         <div className="space-y-3">
           {TOKEN_DEFS.map((def) => {
             const st = statuses[def.name]
@@ -229,11 +240,17 @@ export function ApiTokensCard() {
             return (
               <div
                 key={def.name}
-                className="flex flex-col gap-3 rounded-lg border border-border bg-secondary/20 p-3 sm:flex-row sm:items-center"
+                className={cn(
+                  'flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center',
+                  def.master ? 'border-accent/40 bg-accent/5' : 'border-border bg-secondary/20',
+                )}
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-xs font-semibold text-foreground">{def.name}</span>
+                    {def.master && (
+                      <Badge className="border-accent/40 bg-accent/10 text-accent">Master key</Badge>
+                    )}
                     <Badge
                       className={
                         st?.configured
@@ -286,7 +303,7 @@ export function ApiTokensCard() {
                     <Save className="h-4 w-4" aria-hidden="true" />
                     Save
                   </Button>
-                  {st?.configured && (
+                  {st?.configured && def.canClear !== false && (
                     <Button
                       size="sm"
                       variant="secondary"
