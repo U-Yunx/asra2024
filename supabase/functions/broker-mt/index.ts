@@ -8,11 +8,20 @@
  *
  *   1. the user's OWN free MetaApi token (saved from the Brokers page,
  *      encrypted at rest on broker_connections.metaapi_token), or
- *   2. the platform-wide `METAAPI_TOKEN` Edge Function secret (fallback).
+ *   2. the platform-wide `METAAPI_TOKEN` Edge Function secret (general token).
+ *
+ * Which one is used is an ADMIN SETTING, `settings.metaapi_token_mode`:
+ *   - 'user'    (default) — the user's own token first, then the general
+ *                           token as fallback;
+ *   - 'general'            — ONLY the general `METAAPI_TOKEN` secret; per-user
+ *                           tokens are ignored (never decrypted/used).
+ * Admins switch the mode and read the bridge config through the admin-only
+ * actions `metaapi-mode-set` / `metaapi-config`. The general token itself is
+ * set as an Edge Function secret — it is never stored in the database.
  *
  * The MT account credentials (login / password / server) come from the user's
  * saved `broker_connections` row (platform = 'mt4' | 'mt5'), so neither the
- * password nor the token ever reaches the browser.
+ * password nor any token ever reaches the browser.
  *
  * The "add your MetaApi token" flow runs a SECURITY PASS before activation:
  * the token is validated live against MetaApi's provisioning API
@@ -33,6 +42,10 @@
  *   metaapi-activate-> security-pass gate, then provision + deploy the account
  *                      and mark the connection live-trading active.
  *   metaapi-remove  -> clear the user's saved MetaApi token + activation state.
+ *   metaapi-config  -> ADMIN ONLY: read the token mode + whether the general
+ *                      METAAPI_TOKEN secret is set (masked only).
+ *   metaapi-mode-set-> ADMIN ONLY: switch between per-user tokens and the
+ *                      general platform token.
  *   state           -> deployment + connection status of the MetaApi account.
  *   summary         -> account-information (balance, equity, currency).
  *   open-trades     -> open positions (the robot's live positions).
@@ -138,6 +151,25 @@ async function loadBrokerBridge(supabase: any) {
   const { data } = await supabase.from("settings").select("value").eq("key", "broker_bridge").maybeSingle();
   const v = (data?.value ?? {}) as Record<string, boolean | undefined>;
   return { liveExecutionEnabled: v.liveExecutionEnabled !== false };
+}
+
+/**
+ * Admin setting that decides which MetaApi token the bridge trades through:
+ *   - 'user'    (default) — the user's own token first, general token fallback;
+ *   - 'general'            — only the platform-wide METAAPI_TOKEN secret.
+ * The raw setting value is validated here so a malformed row can never escape
+ * the two allowed modes.
+ */
+async function loadMetaApiTokenMode(supabase: any): Promise<"user" | "general"> {
+  const { data } = await supabase.from("settings").select("value").eq("key", "metaapi_token_mode").maybeSingle();
+  const v = (data?.value ?? {}) as Record<string, unknown>;
+  return v.mode === "general" ? "general" : "user";
+}
+
+/** Whether the signed-in user has the admin role (server-authoritative). */
+async function isAdmin(supabase: any, userId: string): Promise<boolean> {
+  const { data } = await supabase.from("profiles").select("role").eq("id", userId).maybeSingle();
+  return data?.role === "admin";
 }
 
 /** Start of today (UTC) as unix-ms — used for the daily-loss window. */
@@ -314,6 +346,40 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ---- Admin-only bridge configuration (no broker connection required) ----
+  //   metaapi-config   -> read the current token mode + whether the general
+  //                       METAAPI_TOKEN secret is set (masked only).
+  //   metaapi-mode-set -> switch between per-user tokens and the general token.
+  // Both are server-authoritative: the caller must be an admin in `profiles`.
+  if (action === "metaapi-config" || action === "metaapi-mode-set") {
+    const admin = await isAdmin(supabase, user.id);
+    if (!admin) return json({ ok: false, error: "Admins only." }, 403);
+    const tokenMode = await loadMetaApiTokenMode(supabase);
+    const platformSecret = Deno.env.get("METAAPI_TOKEN")?.trim() ?? "";
+    if (action === "metaapi-config") {
+      return json({
+        ok: true,
+        mode: tokenMode,
+        generalTokenConfigured: !!platformSecret,
+        generalTokenMasked: mask(platformSecret) ?? null,
+      });
+    }
+    const nextMode = String(body.mode ?? "").trim();
+    if (nextMode !== "user" && nextMode !== "general") {
+      return json({ ok: false, error: "metaapi_token_mode must be 'user' or 'general'." }, 400);
+    }
+    const { error: upsertErr } = await supabase
+      .from("settings")
+      .upsert(
+        { key: "metaapi_token_mode", value: { mode: nextMode }, updated_at: new Date().toISOString() },
+        { onConflict: "key" },
+      );
+    if (upsertErr) {
+      return json({ ok: false, error: `Could not save the MetaApi token mode: ${upsertErr.message}` }, 500);
+    }
+    return json({ ok: true, mode: nextMode, generalTokenConfigured: !!platformSecret, generalTokenMasked: mask(platformSecret) ?? null });
+  }
+
   // Load the user's MetaTrader connection (platform = mt4 | mt5). A connection
   // is addressed by, in priority order:
   //   connection_id  -> the exact broker_connections row (uuid)
@@ -361,10 +427,16 @@ Deno.serve(async (req: Request) => {
   }
 
   /**
-   * Resolve which MetaApi token this connection trades through: the user's own
-   * saved token first, then the platform-wide METAAPI_TOKEN secret. The user's
-   * token is decrypted server-side; it never reaches the browser.
+   * Resolve which MetaApi token this connection trades through, honoring the
+   * admin setting `settings.metaapi_token_mode`:
+   *   - 'user'    (default) — the user's own saved token first, then the
+   *                           platform-wide METAAPI_TOKEN secret;
+   *   - 'general'           — ONLY the platform-wide METAAPI_TOKEN secret; the
+   *                           user's saved token (if any) is ignored.
+   * The user's token is decrypted server-side; neither token ever reaches the
+   * browser.
    */
+  const tokenMode = await loadMetaApiTokenMode(supabase);
   const platformSecret = Deno.env.get("METAAPI_TOKEN")?.trim() ?? "";
   let userToken: string | null = null;
   if (conn.metaapi_token) {
@@ -374,13 +446,22 @@ Deno.serve(async (req: Request) => {
     }
     userToken = dec ? String(dec).trim() : null;
   }
-  const metaApiToken = userToken ?? (platformSecret || null);
-  const tokenSource = userToken ? "user" : platformSecret ? "platform" : null;
+  let metaApiToken: string | null;
+  let tokenSource: "user" | "general" | null;
+  if (tokenMode === "general") {
+    metaApiToken = platformSecret || null;
+    tokenSource = platformSecret ? "general" : null;
+  } else {
+    metaApiToken = userToken ?? (platformSecret || null);
+    tokenSource = userToken ? "user" : platformSecret ? "general" : null;
+  }
 
   if (!metaApiToken) {
     return json({
       ok: false,
-      error: "No MetaApi token available for live trading. Add your own free MetaApi token on the Brokers page (or ask the admin to set the METAAPI_TOKEN secret).",
+      error: tokenMode === "general"
+        ? "No general MetaApi token is configured. An admin needs to set the METAAPI_TOKEN secret before live trading can work."
+        : "No MetaApi token available for live trading. Add your own free MetaApi token on the Brokers page (or ask the admin to set the METAAPI_TOKEN secret).",
     }, 503);
   }
   const metaHeaders = { "auth-token": metaApiToken, "Content-Type": "application/json" };
@@ -460,6 +541,7 @@ Deno.serve(async (req: Request) => {
       active: !!conn.metaapi_active,
       activeAt: conn.metaapi_active_at,
       meta: conn.metaapi_meta,
+      mode: tokenMode,
       tokenSource,
       platformTokenConfigured: !!platformSecret,
       ...extra,
@@ -508,6 +590,12 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "metaapi-save") {
+      if (tokenMode === "general") {
+        return json({
+          ok: false,
+          error: "The platform is set to use the general MetaApi token (admin setting) — per-user tokens are disabled. Ask an admin to switch the setting back to per-user tokens if you want to add your own.",
+        }, 400);
+      }
       const newToken = String(body.token ?? "").trim();
       if (newToken.length < 20) {
         return json({ ok: false, error: "That doesn't look like a MetaApi API token (it should be at least 20 characters, from metaapi.cloud)." }, 400);
@@ -662,6 +750,12 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "metaapi-remove") {
+      if (tokenMode === "general") {
+        return json({
+          ok: false,
+          error: "The platform is set to use the general MetaApi token — per-user tokens are disabled, so there is nothing to remove.",
+        }, 400);
+      }
       const saveErr = await persistMetaApiState({
         metaapi_token: null,
         metaapi_token_masked: null,

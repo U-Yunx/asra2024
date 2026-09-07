@@ -64,6 +64,8 @@ import {
   disconnectMarketData,
   provisionMarketDataFromBroker,
   activateFreeMarketData,
+  fetchMetaApiConfig,
+  saveMetaApiMode,
 } from '../lib/platform'
 import { PAYMENT_METHOD_LABEL } from '../lib/paymentMethods'
 import type {
@@ -75,6 +77,7 @@ import type {
   PaymentAccountRow,
   PaymentMethod,
   WithdrawalAccountRow,
+  MetaApiBridgeConfig,
 } from '../lib/types'
 import { settingValue } from '../lib/platform'
 import { cn } from '../lib/cn'
@@ -1701,10 +1704,120 @@ function SettingsTab() {
         </CardContent>
       </Card>
 
+      <MetaApiBridgeEditor />
+
       <MarketDataEditor />
 
       <ContactEditor />
     </div>
+  )
+}
+
+/**
+ * Admin: choose which MetaApi token the MT4/5 bridge trades through —
+ * each user's own token ('user') or the platform's general token ('general').
+ * The mode lives in `settings.metaapi_token_mode` and is enforced server-side
+ * by broker-mt (non-admins get a 403 from `metaapi-config`/`metaapi-mode-set`).
+ * The general token itself is a Supabase Edge Function secret (METAAPI_TOKEN),
+ * never stored in the database or shown in the browser — this panel only shows
+ * whether it is configured plus a masked preview.
+ */
+function MetaApiBridgeEditor() {
+  const [config, setConfig] = useState<MetaApiBridgeConfig | null>(null)
+  const [mode, setMode] = useState<'user' | 'general'>('user')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    void fetchMetaApiConfig().then((res) => {
+      if (!alive) return
+      setLoading(false)
+      if (res.data) {
+        setConfig(res.data)
+        setMode(res.data.mode)
+      } else if (res.error) {
+        setErr(res.error)
+      }
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const save = async () => {
+    setErr(null)
+    setMsg(null)
+    setSaving(true)
+    const res = await saveMetaApiMode(mode)
+    setSaving(false)
+    if (res.error) {
+      setErr(res.error)
+      return
+    }
+    if (res.data) setConfig(res.data)
+    setMsg('MetaApi token mode saved ✓')
+    setTimeout(() => setMsg(null), 2500)
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>MetaTrader bridge — MetaApi token mode</CardTitle>
+        <Badge className="border-border bg-muted text-muted-foreground">Live trading through MetaApi (MT4/5)</Badge>
+      </CardHeader>
+      <CardContent>
+        <div className="grid max-w-lg gap-4">
+          <Select label="Which MetaApi token should the bridge use?" value={mode} onChange={(e) => setMode(e.target.value as 'user' | 'general')}>
+            <option value="user">Per-user tokens (each user adds their own, platform token as fallback)</option>
+            <option value="general">General platform token (single token for all connections)</option>
+          </Select>
+
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-secondary/40 px-4 py-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <KeyRound className="h-5 w-5 shrink-0 text-accent" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="font-medium">General MetaApi token (METAAPI_TOKEN)</p>
+                <p className="text-xs text-muted-foreground">
+                  {loading
+                    ? 'checking…'
+                    : config?.generalTokenConfigured
+                      ? `Configured — ${config.generalTokenMasked ?? 'masked preview unavailable'}`
+                      : 'Not set — live trading via the general token is unavailable until it is added.'}
+                </p>
+              </div>
+            </div>
+            <Badge className={config?.generalTokenConfigured ? 'border-up/40 bg-up/10 text-up' : 'border-amber/40 bg-amber/10 text-amber'}>
+              {loading ? '…' : config?.generalTokenConfigured ? 'Configured' : 'Missing'}
+            </Badge>
+          </div>
+
+          {msg && <p className="text-sm text-up">{msg}</p>}
+          {err && <p className="text-sm text-red-200">{err}</p>}
+
+          <div>
+            <Button onClick={() => void save()} loading={saving} disabled={loading || mode === config?.mode}>
+              Save token mode
+            </Button>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            <strong className="text-foreground">Per-user tokens:</strong> each user pastes their own free MetaApi token on
+            the Brokers page; the general token is the fallback when a user has none.{' '}
+            <strong className="text-foreground">General token:</strong> every connection trades through the platform&apos;s
+            token and per-user tokens are ignored. Switching is instant and enforced server-side. The security pass still
+            gates activation in both modes — a revoked or invalid token can never activate live trading.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            The general token itself is a server secret: set or replace it with the secure secret input (key{' '}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono">METAAPI_TOKEN</code>) — it is never stored in the
+            database and never reaches the browser, exactly like per-user tokens.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 

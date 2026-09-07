@@ -378,8 +378,10 @@ export interface MetaApiStatus {
   activeAt: string | null
   /** Non-sensitive MetaApi user info from the last check. */
   meta: { email?: string; name?: string; plan?: string; subscriptionType?: string; region?: string } | null
-  /** Which token is being used: the user's own, or the platform secret. */
-  tokenSource?: 'user' | 'platform' | null
+  /** Which token is being used: the user's own, or the general platform secret. */
+  tokenSource?: 'user' | 'general' | null
+  /** Admin-set token mode: 'user' (per-user tokens first) or 'general' (platform token only). */
+  mode?: 'user' | 'general'
   /** Whether the platform-wide METAAPI_TOKEN secret is configured. */
   platformTokenConfigured: boolean
   /** Best-effort: is the connected MT account present under this token? */
@@ -394,6 +396,23 @@ export interface SettingsRow {
   key: string
   value: Record<string, unknown>
   updated_at: string
+}
+
+/**
+ * Admin-facing state of the MetaApi (MT4/5 bridge) token mode. Returned by the
+ * broker-mt `metaapi-config` / `metaapi-mode-set` actions (admins only). The
+ * general token itself is a server secret — only its masked preview appears
+ * here, never the raw value.
+ */
+export interface MetaApiBridgeConfig {
+  ok?: boolean
+  /** 'user' = per-user tokens first (general-token fallback); 'general' = platform token only. */
+  mode: 'user' | 'general'
+  /** Whether the general METAAPI_TOKEN Edge Function secret is configured. */
+  generalTokenConfigured: boolean
+  /** Masked preview of the general token (first 6 + last 4 chars), or null. */
+  generalTokenMasked: string | null
+  error?: string
 }
 
 /** A tracked ad impression/click for the per-user "Ads history" view. */

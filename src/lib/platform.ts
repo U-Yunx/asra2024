@@ -17,6 +17,7 @@ import type {
   BrokerTokenStatus,
   ContactSettings,
   MetaApiStatus,
+  MetaApiBridgeConfig,
   NotificationRow,
   NotificationType,
   PackageRow,
@@ -677,6 +678,27 @@ export async function removeMetaApiToken(connectionId: string): Promise<{ data: 
   return fn<MetaApiStatus>('broker-mt', {
     body: { action: 'metaapi-remove', connection_id: connectionId },
     fallback: 'Could not remove your MetaApi token.',
+  })
+}
+
+/**
+ * Admin: read the MetaApi bridge configuration — the token mode
+ * ('user' = per-user tokens first, 'general' = platform token only) and
+ * whether the general METAAPI_TOKEN secret is set (masked preview only).
+ * Server-authoritative: the broker-mt function refuses this for non-admins.
+ */
+export async function fetchMetaApiConfig(): Promise<{ data: MetaApiBridgeConfig | null; error: string | null }> {
+  return fn<MetaApiBridgeConfig>('broker-mt', {
+    body: { action: 'metaapi-config' },
+    fallback: 'Could not load the MetaApi bridge configuration.',
+  })
+}
+
+/** Admin: switch between per-user MetaApi tokens and the general platform token. */
+export async function saveMetaApiMode(mode: 'user' | 'general'): Promise<{ data: MetaApiBridgeConfig | null; error: string | null }> {
+  return fn<MetaApiBridgeConfig>('broker-mt', {
+    body: { action: 'metaapi-mode-set', mode },
+    fallback: 'Could not save the MetaApi token mode.',
   })
 }
 

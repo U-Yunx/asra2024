@@ -171,8 +171,10 @@ const METAAPI_SECURITY_LABEL: Record<MetaApiStatus['security'], string> = {
  * (metaapi.cloud), which is validated live against MetaApi's provisioning API
  * (the "security pass"), then activate live trading — the bridge auto-generates
  * the MetaApi account and deploys it ("auto-generate & inject from the free
- * provider"). Without a user token the platform-wide METAAPI_TOKEN secret is
- * used. Only a masked preview of the token ever reaches the browser.
+ * provider"). When the admin sets the bridge to "general token" mode, all
+ * connections instead trade through the platform-wide METAAPI_TOKEN secret and
+ * the per-user token controls are hidden. Only a masked preview of any token
+ * ever reaches the browser.
  */
 function MetaApiPanel({ connectionId }: { connectionId: string }) {
   const [status, setStatus] = useState<MetaApiStatus | null>(null)
@@ -281,10 +283,30 @@ function MetaApiPanel({ connectionId }: { connectionId: string }) {
       </div>
 
       <p className="mt-1 text-[11px] text-muted-foreground">
-        MetaTrader has no public API, so ANA24 connects your MT account through MetaApi&apos;s cloud. Add your own{' '}
-        <span className="text-foreground">free MetaApi token</span> to validate &amp; activate live trading right away; otherwise the
-        platform&apos;s shared bridge is used when available.
+        MetaTrader has no public API, so ANA24 connects your MT account through MetaApi&apos;s cloud.{' '}
+        {s?.mode === 'general' ? (
+          <>
+            The platform is set to use its <span className="text-foreground">general MetaApi token</span> for live trading,
+            so there&apos;s no token to add here.
+          </>
+        ) : (
+          <>
+            Add your own <span className="text-foreground">free MetaApi token</span> to validate &amp; activate live
+            trading right away; otherwise the platform&apos;s shared bridge is used when available.
+          </>
+        )}
       </p>
+
+      {s?.mode === 'general' && (
+        <p className="mt-1.5 flex items-start gap-1.5 rounded-md border border-amber/30 bg-amber/10 px-2.5 py-1.5 text-[11px] text-amber-200/90">
+          <ShieldCheck className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+          <span>
+            General token mode is active (admin setting) — all MT connections trade through the platform&apos;s token and
+            per-user tokens are disabled. The security pass below runs against the general token.
+            {s?.hasUserToken ? ' Your saved token is ignored while this mode is on.' : ''}
+          </span>
+        </p>
+      )}
 
       {s?.hasUserToken && (
         <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
@@ -300,7 +322,7 @@ function MetaApiPanel({ connectionId }: { connectionId: string }) {
         <p className={cn('mt-1 text-[11px]', security === 'passed' ? 'text-emerald-200' : 'text-red-300')}>{s.securityNote}</p>
       )}
 
-      {!s?.hasUserToken && !loading && (
+      {s?.mode !== 'general' && !s?.hasUserToken && !loading && (
         <div className="mt-2">
           {showForm ? (
             <form onSubmit={save} className="grid gap-2">
@@ -347,17 +369,19 @@ function MetaApiPanel({ connectionId }: { connectionId: string }) {
             <CloudUpload className="h-3.5 w-3.5" aria-hidden="true" />
             {s.active ? 'Re-activate live trading' : 'Activate live trading'}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            loading={busy === 'remove'}
-            disabled={busy !== null}
-            onClick={() => void remove()}
-            className="text-red-300 hover:text-red-200"
-          >
-            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
-            Remove token
-          </Button>
+          {s?.mode !== 'general' && (
+            <Button
+              variant="ghost"
+              size="sm"
+              loading={busy === 'remove'}
+              disabled={busy !== null}
+              onClick={() => void remove()}
+              className="text-red-300 hover:text-red-200"
+            >
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Remove token
+            </Button>
+          )}
         </div>
       )}
 
