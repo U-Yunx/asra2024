@@ -53,6 +53,27 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+// Service-role client for the secure token store (`app_secrets`, RLS deny-all).
+// The Twelve Data key is read from there first (saved via the Configuration
+// page's auto token store — no PAT needed) and falls back to the env secret.
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
+const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const admin = SERVICE_KEY ? createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } }) : null;
+
+async function resolveTwelveDataKey(): Promise<string | null> {
+  if (admin) {
+    try {
+      const { data } = await admin.from("app_secrets").select("value").eq("key", "TWELVE_DATA_API_KEY").maybeSingle();
+      const v = data?.value;
+      if (typeof v === "string" && v.trim()) return v.trim();
+    } catch {
+      // fall through to the env secret
+    }
+  }
+  const env = Deno.env.get("TWELVE_DATA_API_KEY")?.trim() ?? "";
+  return env || null;
+}
+
 const PROJECT_REF =
   (Deno.env.get("SUPABASE_URL") ?? "").match(/https:\/\/([^.]+)\.supabase\.co/)?.[1] ?? "";
 
@@ -183,7 +204,7 @@ Deno.serve(async (req: Request) => {
     let items: NewsItem[] | null = null;
     let source: "live" | "fallback" = "live";
 
-    const apiKey = Deno.env.get("TWELVE_DATA_API_KEY");
+    const apiKey = await resolveTwelveDataKey();
     if (apiKey) {
       try {
         items = await fetchTwelveDataNews(apiKey);

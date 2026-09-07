@@ -17,12 +17,13 @@
  *                           tokens are ignored (never decrypted/used).
  * Admins switch the mode, read the bridge config, and set/clear the general
  * token through the admin-only actions `metaapi-mode-set` / `metaapi-config` /
- * `metaapi-token-set` / `metaapi-token-clear`. The general token itself is an
- * Edge Function secret (METAAPI_TOKEN) — it is never stored in the database.
- * Admins set it from the Admin panel, which POSTs the token here over HTTPS;
- * this function stores it in the project's Edge Function secrets via the
- * Supabase Management API (scoped PAT in SUPABASE_ACCESS_TOKEN) and validates
- * it live against MetaApi. The raw token never reaches the browser afterwards.
+ * `metaapi-token-set` / `metaapi-token-clear`. The general token is stored in
+ * the app's secure token store (`app_secrets` — RLS deny-all, service-role
+ * only) using the caller's signed-in admin session as the credential; no
+ * Personal Access Token is required. When a PAT (SUPABASE_ACCESS_TOKEN) is
+ * configured, the token is ALSO mirrored to the project's Edge Function
+ * secrets via the Supabase Management API so env-var readers keep working
+ * (best-effort, never blocking). The raw token never reaches the browser.
  *
  * The MT account credentials (login / password / server) come from the user's
  * saved `broker_connections` row (platform = 'mt4' | 'mt5'), so neither the
@@ -194,10 +195,34 @@ function mask(token: string): string | null {
 }
 
 /**
- * Supabase Management API — used by the admin-only `metaapi-token-set` /
- * `metaapi-token-clear` actions to write the general METAAPI_TOKEN secret.
- * The management token (a scoped PAT with "Edge Function Secrets" write) is
- * itself an Edge Function secret (SUPABASE_ACCESS_TOKEN), never a VITE_ var.
+ * Secure token store access — `app_secrets` is RLS-locked (no anon/
+ * authenticated policy), so only the service-role client used here can read
+ * or write the general MetaApi token. The caller's admin session authorizes
+ * the write; no Personal Access Token is involved.
+ */
+async function storeGet(supabase: any, key: string): Promise<string | null> {
+  const { data } = await supabase.from("app_secrets").select("value").eq("key", key).maybeSingle();
+  const v = data?.value;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+async function storeSet(supabase: any, key: string, value: string): Promise<string | null> {
+  const { error } = await supabase.from("app_secrets").upsert({ key, value }, { onConflict: "key" });
+  return error?.message ?? null;
+}
+
+/** Resolve the platform-wide MetaApi token: secure store first, env fallback. */
+async function loadPlatformSecret(supabase: any): Promise<string> {
+  const stored = await storeGet(supabase, "METAAPI_TOKEN");
+  if (stored) return stored;
+  return Deno.env.get("METAAPI_TOKEN")?.trim() ?? "";
+}
+
+/**
+ * Optional mirror to the project's Edge Function secrets via the Supabase
+ * Management API. Only runs when a real PAT (SUPABASE_ACCESS_TOKEN) is set as
+ * an env secret; otherwise it is skipped silently — the DB store above is
+ * authoritative, so live trading works with no PAT at all.
  * The project ref is derived from SUPABASE_URL, which the runtime injects.
  */
 const MANAGEMENT_API = "https://api.supabase.com/v1/projects";
@@ -219,8 +244,8 @@ async function managementApiSecretWrite(
   const pat = Deno.env.get("SUPABASE_ACCESS_TOKEN")?.trim() ?? "";
   if (!pat) {
     return {
-      ok: false,
-      error: "The server has no SUPABASE_ACCESS_TOKEN secret. Add one (a scoped PAT with “Edge Function Secrets” write) so the admin panel can store the MetaApi token.",
+      ok: true,
+      error: null,
     };
   }
   const ref = projectRefFromEnv();
@@ -423,7 +448,7 @@ Deno.serve(async (req: Request) => {
     const admin = await isAdmin(supabase, user.id);
     if (!admin) return json({ ok: false, error: "Admins only." }, 403);
     const tokenMode = await loadMetaApiTokenMode(supabase);
-    const platformSecret = Deno.env.get("METAAPI_TOKEN")?.trim() ?? "";
+    const platformSecret = await loadPlatformSecret(supabase);
     if (action === "metaapi-config") {
       return json({
         ok: true,
@@ -437,10 +462,16 @@ Deno.serve(async (req: Request) => {
       if (newToken.length < 20) {
         return json({ ok: false, error: "That doesn't look like a MetaApi API token (it should be at least 20 characters, from metaapi.cloud)." }, 400);
       }
-      const saved = await managementApiSecretWrite("POST", [{ name: "METAAPI_TOKEN", value: newToken }]);
-      if (!saved.ok) return json({ ok: false, error: saved.error }, 502);
+      // Primary: secure app store — always works, authorized by the admin's
+      // signed-in session (no Personal Access Token required).
+      const dbErr = await storeSet(supabase, "METAAPI_TOKEN", newToken);
+      if (dbErr) return json({ ok: false, error: `Could not store the MetaApi token: ${dbErr}` }, 500);
+      // Optional mirror to Edge Function secrets when a PAT is configured.
+      let mirrorNote = "";
+      const mirror = await managementApiSecretWrite("POST", [{ name: "METAAPI_TOKEN", value: newToken }]);
+      if (!mirror.ok) mirrorNote = ` (platform-secret mirror skipped: ${mirror.error})`;
       // Validate the saved token live so a typo'd or revoked token is caught
-      // the moment the admin saves it (it is already the live secret either way).
+      // the moment the admin saves it (it is the live secret either way).
       const validation = await validateMetaApiToken(newToken);
       return json({
         ok: true,
@@ -449,13 +480,13 @@ Deno.serve(async (req: Request) => {
         generalTokenMasked: mask(newToken) ?? null,
         valid: validation.ok,
         note: validation.ok
-          ? `General MetaApi token saved ✓ — MetaApi accepted it${validation.user?.email ? ` (${validation.user.email})` : ""}. The bridge now trades through this token in general mode.`
-          : `Token saved, but MetaApi rejected it: ${validation.error} — live trading with it will fail the security pass. Save the correct token or clear this one.`,
+          ? `General MetaApi token saved ✓ — MetaApi accepted it${validation.user?.email ? ` (${validation.user.email})` : ""}. The bridge now trades through this token in general mode.${mirrorNote}`
+          : `Token saved, but MetaApi rejected it: ${validation.error} — live trading with it will fail the security pass. Save the correct token or clear this one.${mirrorNote}`,
       });
     }
     if (action === "metaapi-token-clear") {
-      const cleared = await managementApiSecretWrite("DELETE", ["METAAPI_TOKEN"]);
-      if (!cleared.ok) return json({ ok: false, error: cleared.error }, 502);
+      await supabase.from("app_secrets").delete().eq("key", "METAAPI_TOKEN");
+      await managementApiSecretWrite("DELETE", ["METAAPI_TOKEN"]); // best-effort mirror
       return json({
         ok: true,
         mode: tokenMode,
@@ -537,7 +568,7 @@ Deno.serve(async (req: Request) => {
    * browser.
    */
   const tokenMode = await loadMetaApiTokenMode(supabase);
-  const platformSecret = Deno.env.get("METAAPI_TOKEN")?.trim() ?? "";
+  const platformSecret = await loadPlatformSecret(supabase);
   let userToken: string | null = null;
   if (conn.metaapi_token) {
     const { data: dec, error: decErr2 } = await supabase.rpc("decrypt_broker_cred", { p_enc: conn.metaapi_token });

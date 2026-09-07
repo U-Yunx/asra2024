@@ -25,9 +25,9 @@ export interface TokenDef {
 export const TOKEN_DEFS: TokenDef[] = [
   {
     name: 'SUPABASE_ACCESS_TOKEN',
-    label: 'Supabase access token',
+    label: 'Supabase API token',
     description:
-      'Master key — a Personal Access Token (sbp_…) with "Edge Function Secrets" read-write scope for this project. Powers secure storage of every other token on this page.',
+      'Auto-managed — generated & injected from your signed-in session with one click, no dashboard needed. Optional: paste a Personal Access Token (sbp_…) to also mirror tokens to the platform secret store.',
     signupUrl: 'https://supabase.com/dashboard/account/tokens',
     master: true,
     canClear: false,
@@ -75,6 +75,16 @@ export interface TokenStatus {
   label: string
   configured: boolean
   masked: string | null
+  /** True when the master token is managed automatically (no PAT required). */
+  autoManaged?: boolean
+}
+
+/** One-click auto token-store state returned by the admin-tokens function. */
+export interface BootstrapInfo {
+  mode: 'auto' | 'manual'
+  verified: boolean
+  robot_token: 'present' | 'missing'
+  bootstrapped_at: string | null
 }
 
 export interface SaveTokenResult {
@@ -85,11 +95,33 @@ export interface SaveTokenResult {
   error?: string | null
 }
 
-export async function fetchTokensConfig(): Promise<{ data: { tokens: TokenStatus[] } | null; error: string | null }> {
-  return fn<{ tokens: TokenStatus[] }>('admin-tokens', {
+export async function fetchTokensConfig(): Promise<{
+  data: { tokens: TokenStatus[]; bootstrap: BootstrapInfo | null } | null
+  error: string | null
+}> {
+  return fn<{ tokens: TokenStatus[]; bootstrap: BootstrapInfo | null }>('admin-tokens', {
     body: { action: 'tokens-config' },
     fallback: 'Could not load token status.',
   })
+}
+
+/**
+ * One-click "generate & inject automatically": the server uses the caller's
+ * signed-in session to generate + inject a fresh Supabase API token into the
+ * secure store, verify it with a round-trip, ensure the robot's cron token
+ * exists, and mark the store auto-managed. No Personal Access Token needed.
+ */
+export async function bootstrapTokens(): Promise<{
+  data: { ok: boolean; mode?: string; verified?: boolean; message?: string; tokens?: TokenStatus[] } | null
+  error: string | null
+}> {
+  return fn<{ ok: boolean; mode?: string; verified?: boolean; message?: string; tokens?: TokenStatus[] }>(
+    'admin-tokens',
+    {
+      body: { action: 'tokens-bootstrap' },
+      fallback: 'Could not auto-configure the Supabase API token.',
+    },
+  )
 }
 
 export async function saveTokens(
