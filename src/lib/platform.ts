@@ -543,11 +543,15 @@ export async function saveConnection(input: {
   server?: string
   robotNumber?: number
 }): Promise<{ error: string | null }> {
+  // MT4/MT5 passwords are stored verbatim — they legitimately contain spaces
+  // and trimming would corrupt the credential (MetaApi would then reject the
+  // login). Only OANDA API tokens (opaque, no whitespace) get trimmed.
+  const isMt = input.platform === 'mt4' || input.platform === 'mt5'
   const { error } = await supabase.from('broker_connections').upsert(
     {
       user_id: input.userId,
       broker_id: input.brokerId,
-      api_key: input.apiKey.trim(),
+      api_key: isMt ? input.apiKey : input.apiKey.trim(),
       account_id: input.accountId?.trim() || null,
       account_type: input.accountType,
       platform: input.platform ?? 'oanda',

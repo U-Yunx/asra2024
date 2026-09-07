@@ -111,7 +111,7 @@ function MethodToggle({ method, onChange }: { method: TradingMethod; onChange: (
 }
 
 /** Live account summary pulled from the connected broker through its Edge Function. */
-function LiveSummary({ fn, label }: { fn: 'broker-oanda' | 'broker-mt'; label: string }) {
+function LiveSummary({ fn, label, connectionId }: { fn: 'broker-oanda' | 'broker-mt'; label: string; connectionId?: string }) {
   const [data, setData] = useState<{ balance: number; nav: number; openTrades: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -130,7 +130,7 @@ function LiveSummary({ fn, label }: { fn: 'broker-oanda' | 'broker-mt'; label: s
         }
         error?: string
       }>(fn, {
-        body: { action: 'summary' },
+        body: { action: 'summary', connection_id: connectionId },
         fallback: `Could not load your ${label} account.`,
       })
       if (!active) return
@@ -150,7 +150,7 @@ function LiveSummary({ fn, label }: { fn: 'broker-oanda' | 'broker-mt'; label: s
     return () => {
       active = false
     }
-  }, [fn, label])
+  }, [fn, label, connectionId])
 
   if (loading) {
     return (
@@ -295,6 +295,13 @@ export function Trading() {
   const { subscriptions } = useSubscriptions(user?.id)
   const access = useAccess(profile, subscriptions)
 
+  // The user's broker connections, resolved BEFORE the live adapters are built
+  // so the robot trades the exact account shown in the UI (a user may connect
+  // several MT4/5 brokers side by side).
+  const { connections } = useBrokers(user?.id)
+  const oandaConn = connections.find((c) => c.brokers?.slug === 'oanda')
+  const mtConn = connections.find((c) => c.platform === 'mt4' || c.platform === 'mt5')
+
   const {
     account,
     loading,
@@ -308,7 +315,7 @@ export function Trading() {
     closeRobotPositions,
     flattenAll,
     reset,
-  } = usePaperAccount()
+  } = usePaperAccount({ oanda: oandaConn?.id, mt: mtConn?.id })
   const [strategy, updateStrategy] = useSelectedStrategy()
   const {
     prefs,
@@ -344,9 +351,6 @@ export function Trading() {
   const { quotes, kind: marketKind, error: marketError } = useQuotes(15_000, scanPairs)
   const canRunRobot = access.hasAccess || (mode === 'paper' && access.paperTrading)
   const { tune, update: updateTune, applyPreset, reset: resetTune } = useManualTune()
-  const { connections } = useBrokers(user?.id)
-  const oandaConn = connections.find((c) => c.brokers?.slug === 'oanda')
-  const mtConn = connections.find((c) => c.platform === 'mt4' || c.platform === 'mt5')
   // External-broker live (OANDA / MT) — managed live runs on the platform's own
   // ledger and needs no broker connection, so it never depends on these.
   const isBrokerLive = mode === 'oanda' || mode === 'mt'
@@ -1672,7 +1676,7 @@ export function Trading() {
         ) : (
           <>
             <LiveBanner conn={liveConn} label={liveLabel} />
-            <LiveSummary fn={mode === 'oanda' ? 'broker-oanda' : 'broker-mt'} label={liveLabel} />
+            <LiveSummary fn={mode === 'oanda' ? 'broker-oanda' : 'broker-mt'} label={liveLabel} connectionId={liveConn.id} />
             {account ? (
               accountBody(account)
             ) : loading ? (

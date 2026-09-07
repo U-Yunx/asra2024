@@ -32,14 +32,20 @@ const robotTokenCache = new Map<string, { token: string; at: number }>()
 /**
  * Fetch the caller's robot REST API token for a platform / robot slot and cache
  * it briefly. The token authorizes open/close on the broker bridges; it is
- * scoped to the signed-in user and never stored client-side.
+ * scoped to the signed-in user and never stored client-side. When a
+ * `connectionId` is given (the live account the UI is showing), the token is
+ * fetched for that exact connection so each connected broker has its own.
  */
-async function robotTokenFor(platform: 'oanda' | 'mt', robotNumber = 1): Promise<string | null> {
-  const key = `${platform}:${robotNumber}`
+async function robotTokenFor(
+  platform: 'oanda' | 'mt',
+  robotNumber = 1,
+  connectionId?: string,
+): Promise<string | null> {
+  const key = `${platform}:${robotNumber}:${connectionId ?? ''}`
   const hit = robotTokenCache.get(key)
   if (hit && Date.now() - hit.at < 60_000) return hit.token
   const { data } = await fn<{ token?: string }>('broker-token', {
-    body: { action: 'get', platform, robot_number: robotNumber },
+    body: { action: 'get', platform, robot_number: robotNumber, connection_id: connectionId },
     fallback: 'Could not read your robot REST API token.',
   })
   const token = data?.token ?? null
@@ -321,15 +327,21 @@ export class OandaBrokerAdapter implements BrokerAdapter {
   /** UTC day key the daily-loss baseline is anchored to (see refreshLive). */
   private dayKey = ''
   private dayStartBalance = 0
+  /** The exact broker_connections row this adapter trades (if known). */
+  private connectionId?: string
 
-  constructor(getState: () => AccountState, commit: (next: AccountState) => void) {
+  constructor(getState: () => AccountState, commit: (next: AccountState) => void, connectionId?: string) {
     this.getState = getState
     this.commit = commit
+    this.connectionId = connectionId
   }
 
   private api(action: string, body: Record<string, unknown> = {}) {
+    // Pin every call to THIS connection so a user with several brokers never
+    // hits a different one's account. The bridge falls back to the default
+    // slot when no id is known (legacy single-connection behaviour).
     return fn<Record<string, unknown>>('broker-oanda', {
-      body: { action, ...body },
+      body: { action, ...(this.connectionId ? { connection_id: this.connectionId } : {}), ...body },
       fallback: 'Could not reach your broker. Try again.',
     })
   }
@@ -454,7 +466,7 @@ export class OandaBrokerAdapter implements BrokerAdapter {
     if (!(stopDistance > 0)) return { error: 'A stop loss is required on every position.' }
     const units = Math.max(1, Math.round(req.units))
 
-    const token = await robotTokenFor('oanda')
+    const token = await robotTokenFor('oanda', 1, this.connectionId)
     const { data, error: fnErr } = await this.api('open-position', {
       symbol: req.symbol,
       side: req.side,
@@ -478,7 +490,7 @@ export class OandaBrokerAdapter implements BrokerAdapter {
     _price: number,
     _rates: RatesMap,
   ): Promise<{ error: string | null }> {
-    const token = await robotTokenFor('oanda')
+    const token = await robotTokenFor('oanda', 1, this.connectionId)
     const { data, error: fnErr } = await this.api('close-position', { tradeId: id, token })
     if (fnErr) return { error: friendlyBridgeError(fnErr, 'Could not reach your broker. Try again.') }
     const res = data as { ok?: boolean; error?: string }
@@ -557,15 +569,21 @@ export class MtBrokerAdapter implements BrokerAdapter {
   /** UTC day key the daily-loss baseline is anchored to (see refreshLive). */
   private dayKey = ''
   private dayStartBalance = 0
+  /** The exact broker_connections row this adapter trades (if known). */
+  private connectionId?: string
 
-  constructor(getState: () => AccountState, commit: (next: AccountState) => void) {
+  constructor(getState: () => AccountState, commit: (next: AccountState) => void, connectionId?: string) {
     this.getState = getState
     this.commit = commit
+    this.connectionId = connectionId
   }
 
   private api(action: string, body: Record<string, unknown> = {}) {
+    // Pin every call to THIS connection so a user with several MT4/5 brokers
+    // never trades a different one's account. The bridge falls back to the
+    // default slot when no id is known (legacy single-connection behaviour).
     return fn<Record<string, unknown>>('broker-mt', {
-      body: { action, ...body },
+      body: { action, ...(this.connectionId ? { connection_id: this.connectionId } : {}), ...body },
       fallback: 'Could not reach your broker. Try again.',
     })
   }
@@ -698,7 +716,7 @@ export class MtBrokerAdapter implements BrokerAdapter {
     // units), so never send a dust order — floor the size at one micro lot.
     const units = Math.max(1_000, Math.round(req.units))
 
-    const token = await robotTokenFor('mt')
+    const token = await robotTokenFor('mt', 1, this.connectionId)
     const { data, error: fnErr } = await this.api('open-position', {
       symbol: req.symbol,
       side: req.side,
@@ -722,7 +740,7 @@ export class MtBrokerAdapter implements BrokerAdapter {
     _price: number,
     _rates: RatesMap,
   ): Promise<{ error: string | null }> {
-    const token = await robotTokenFor('mt')
+    const token = await robotTokenFor('mt', 1, this.connectionId)
     const { data, error: fnErr } = await this.api('close-position', { positionId: id, token })
     if (fnErr) return { error: friendlyBridgeError(fnErr, 'Could not reach your broker. Try again.') }
     const res = data as { ok?: boolean; error?: string }
@@ -750,9 +768,10 @@ export class MtBrokerAdapter implements BrokerAdapter {
 export function createBroker(
   mode: BrokerMode,
   deps: { getState: () => AccountState; commit: (next: AccountState) => void },
+  connectionId?: string,
 ): BrokerAdapter {
-  if (mode === 'oanda') return new OandaBrokerAdapter(deps.getState, deps.commit)
-  if (mode === 'mt') return new MtBrokerAdapter(deps.getState, deps.commit)
+  if (mode === 'oanda') return new OandaBrokerAdapter(deps.getState, deps.commit, connectionId)
+  if (mode === 'mt') return new MtBrokerAdapter(deps.getState, deps.commit, connectionId)
   if (mode === 'managed') return new ManagedBroker(deps.getState, deps.commit)
   return new PaperBroker(deps.getState, deps.commit)
 }

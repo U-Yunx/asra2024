@@ -66,8 +66,10 @@ type MtStatus =
  * Live-trading readiness for a connected MetaTrader account, surfaced on the
  * broker card. Verifies against the MetaApi bridge (broker-mt) and lets the
  * user provision the account right from the card if it isn't activated yet.
+ * `connectionId` pins the call to THIS connection so several MT4/5 brokers can
+ * sit side by side without their status checks colliding on one shared slot.
  */
-function MtConnectionStatus() {
+function MtConnectionStatus({ connectionId }: { connectionId: string }) {
   const [status, setStatus] = useState<MtStatus>({ kind: 'checking' })
   const [busy, setBusy] = useState(false)
 
@@ -75,14 +77,14 @@ function MtConnectionStatus() {
     setStatus({ kind: 'checking' })
     const { data, error } = await fn<{ ok?: boolean; provisioned?: boolean }>(
       'broker-mt',
-      { body: { action: 'verify' }, fallback: 'Could not reach the MetaTrader bridge.' },
+      { body: { action: 'verify', connection_id: connectionId }, fallback: 'Could not reach the MetaTrader bridge.' },
     )
     if (!data?.ok) {
       setStatus({ kind: 'error', message: error ?? 'Could not reach the MetaTrader bridge.' })
       return
     }
     setStatus(data.provisioned ? { kind: 'ready' } : { kind: 'not-provisioned' })
-  }, [])
+  }, [connectionId])
 
   useEffect(() => {
     void check()
@@ -92,7 +94,7 @@ function MtConnectionStatus() {
     setBusy(true)
     const { error } = await fn<{ ok?: boolean }>(
       'broker-mt',
-      { body: { action: 'provision' }, fallback: 'Could not provision this account.' },
+      { body: { action: 'provision', connection_id: connectionId }, fallback: 'Could not provision this account.' },
     )
     setBusy(false)
     if (error) {
@@ -180,21 +182,23 @@ function ConnectPanel({
     }
   }
 
-  /** Verify an MT account against the MetaApi bridge through broker-mt. */
-  const verifyMt = useCallback(async (): Promise<{ provisioned: boolean; error: string | null }> => {
+  /** Verify an MT account against the MetaApi bridge through broker-mt.
+   *  `brokerId` pins the call to the connection just saved for that broker, so
+   *  with several MT4/5 accounts connected, each card's flow verifies its own. */
+  const verifyMt = useCallback(async (brokerId?: string): Promise<{ provisioned: boolean; error: string | null }> => {
     const { data, error } = await fn<{ ok?: boolean; provisioned?: boolean }>(
       'broker-mt',
-      { body: { action: 'verify' }, fallback: 'Could not reach the MetaTrader bridge.' },
+      { body: { action: 'verify', broker_id: brokerId }, fallback: 'Could not reach the MetaTrader bridge.' },
     )
     if (!data?.ok) return { provisioned: false, error: error ?? 'Could not reach the MetaTrader bridge.' }
     return { provisioned: !!data.provisioned, error: null }
   }, [])
 
   /** Provision a saved MT account in MetaApi (deploy to their cloud) via broker-mt. */
-  const provisionMt = useCallback(async (): Promise<string | null> => {
+  const provisionMt = useCallback(async (brokerId?: string): Promise<string | null> => {
     const { error } = await fn<{ ok?: boolean }>(
       'broker-mt',
-      { body: { action: 'provision' }, fallback: 'MetaApi could not provision this account.' },
+      { body: { action: 'provision', broker_id: brokerId }, fallback: 'MetaApi could not provision this account.' },
     )
     return error
   }, [])
@@ -286,7 +290,7 @@ function ConnectPanel({
       }
       // The credentials are saved. Now verify against the MetaApi bridge and, if
       // the account isn't provisioned yet, provision it so live trading works.
-      const { provisioned, error: verifyErr } = await verifyMt()
+      const { provisioned, error: verifyErr } = await verifyMt(broker.id)
       if (verifyErr) {
         // The bridge itself isn't reachable (e.g. METAAPI_TOKEN not set yet).
         // The connection is saved and will become tradeable once the bridge is configured.
@@ -296,7 +300,7 @@ function ConnectPanel({
       } else if (provisioned) {
         setSuccess('MetaTrader account connected & verified — ready to trade live.')
       } else {
-        const provisionErr = await provisionMt()
+        const provisionErr = await provisionMt(broker.id)
         setSuccess(
           provisionErr
             ? `MetaTrader account connected & saved. One more step to activate live trading: ${provisionErr}`
@@ -693,7 +697,7 @@ export function Brokers() {
                         </div>
                         {(conn.platform === 'mt4' || conn.platform === 'mt5') && (
                           <div className="mt-2 border-t border-up/20 pt-2">
-                            <MtConnectionStatus />
+                            <MtConnectionStatus connectionId={conn.id} />
                           </div>
                         )}
                         <RestApiTokenPanel connectionId={conn.id} />

@@ -34,9 +34,11 @@ export const DEFAULT_PAPER_BALANCE = 10_000
 /**
  * Owns the paper account lifecycle: loads (Supabase when signed in, otherwise
  * localStorage), persists on every change, and exposes a `BrokerAdapter` so the
- * UI never talks to the engine directly.
+ * UI never talks to the engine directly. `connectionIds` maps each live platform
+ * to the broker_connections row it should trade (one per connected broker) —
+ * when omitted the bridges fall back to the user's default robot slot.
  */
-export function usePaperAccount() {
+export function usePaperAccount(connectionIds?: { oanda?: string; mt?: string }) {
   const { user } = useAuth()
   const [account, setAccount] = useState<AccountState | null>(null)
   const [loading, setLoading] = useState(true)
@@ -91,13 +93,17 @@ export function usePaperAccount() {
 
   const commit = useCallback((next: AccountState) => setAccount(next), [])
 
+  // Pick the connection matching the active mode (oanda ↔ oandaConn, mt ↔
+  // mtConn). Passing the id lets a user with several brokers trade the exact
+  // account shown in the UI instead of always the default robot slot.
+  const brokerConnectionId = mode === 'oanda' ? connectionIds?.oanda : mode === 'mt' ? connectionIds?.mt : undefined
   const broker = useMemo<BrokerAdapter>(
     () =>
       createBroker(mode, {
         getState: () => stateRef.current ?? createAccount(DEFAULT_PAPER_BALANCE),
         commit,
-      }),
-    [mode, commit],
+      }, brokerConnectionId),
+    [mode, commit, brokerConnectionId],
   )
 
   // In live mode, pull the authoritative account from the broker as soon as the

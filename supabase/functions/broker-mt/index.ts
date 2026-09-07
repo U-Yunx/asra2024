@@ -169,16 +169,29 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // Load the user's MetaTrader connection (platform = mt4 | mt5). Multiple
-  // robot slots are supported — pick the one requested or the first by slot.
+  // Load the user's MetaTrader connection (platform = mt4 | mt5). A connection
+  // is addressed by, in priority order:
+  //   connection_id  -> the exact broker_connections row (uuid)
+  //   broker_id      -> the broker row (uuid) this connection belongs to
+  //   robot_number   -> the robot slot (default 1)
+  // Addressing by id lets a user connect SEVERAL MT4/5 brokers side by side
+  // (FBS MT4, FXGT MT5, …) without them colliding on a shared robot slot: each
+  // broker card / live mode sends the id of its own connection. The robot-slot
+  // fallback keeps the historical "first by slot" behaviour, ordered by
+  // created_at so a duplicate slot never 500s.
+  const connectionId = String(body.connection_id ?? url.searchParams.get("connection_id") ?? "").trim();
+  const brokerId = String(body.broker_id ?? url.searchParams.get("broker_id") ?? "").trim();
   const robotNumber = Number(body.robot_number ?? url.searchParams.get("robot_number") ?? 1);
-  const { data: conn, error: connErr } = await supabase
+
+  let connQuery = supabase
     .from("broker_connections")
     .select("id, api_key, account_id, account_type, platform, server, robot_number")
     .eq("user_id", user.id)
-    .in("platform", ["mt4", "mt5"])
-    .eq("robot_number", robotNumber)
-    .maybeSingle();
+    .in("platform", ["mt4", "mt5"]);
+  if (connectionId) connQuery = connQuery.eq("id", connectionId).maybeSingle();
+  else if (brokerId) connQuery = connQuery.eq("broker_id", brokerId).maybeSingle();
+  else connQuery = connQuery.eq("robot_number", robotNumber).order("created_at", { ascending: true }).limit(1).maybeSingle();
+  const { data: conn, error: connErr } = await connQuery;
   if (connErr) return json({ ok: false, error: "Could not load your broker connection." }, 500);
   if (!conn?.api_key || !conn.account_id || !conn.server) {
     return json({
