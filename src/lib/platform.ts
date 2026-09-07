@@ -16,6 +16,7 @@ import type {
   BrokerRow,
   BrokerTokenStatus,
   ContactSettings,
+  MetaApiStatus,
   NotificationRow,
   NotificationType,
   PackageRow,
@@ -521,12 +522,18 @@ export async function deleteBroker(id: string): Promise<string | null> {
 }
 
 export async function fetchMyConnections(userId: string): Promise<BrokerConnectionRow[]> {
-  // Never SELECT the stored credential (api_key = MT password / OANDA token)
-  // into the browser — it is only ever read server-side by the broker edge
-  // functions. The column stays in the row type for internal typing only.
+  // Never SELECT the stored credential (api_key = MT password / OANDA token,
+  // metaapi_token = the user's MetaApi API token) into the browser — they are
+  // only ever read server-side by the broker edge functions. The columns stay
+  // in the row type for internal typing only; the raw metaapi_token is also
+  // column-revoked in Postgres as defence-in-depth.
   const { data } = await supabase
     .from('broker_connections')
-    .select('id, user_id, broker_id, account_id, account_type, platform, server, robot_number, status, last_verified_at, created_at, brokers(*)')
+    .select(
+      'id, user_id, broker_id, account_id, account_type, platform, server, robot_number, status, last_verified_at, created_at, ' +
+        'metaapi_token_masked, metaapi_security, metaapi_security_note, metaapi_token_checked_at, metaapi_meta, metaapi_active, metaapi_active_at, ' +
+        'brokers(*)',
+    )
     .eq('user_id', userId)
   // supabase-js types the joined sub-select loosely; the shape matches
   // BrokerConnectionRow (credential intentionally omitted from the select).
@@ -624,6 +631,52 @@ export async function revokeBrokerToken(connectionId?: string): Promise<{ data: 
   return fn<BrokerTokenStatus>('broker-token', {
     body: { action: 'revoke', connection_id: connectionId },
     fallback: 'Could not revoke the REST API token.',
+  })
+}
+
+/* ------------------------------- MetaApi bridge ---------------------------- */
+/* Per-connection MetaApi management (broker-mt). The user's MetaApi token is
+ * stored encrypted at rest server-side; only the masked preview + security-pass
+ * state ever come back to the browser. Activation is gated on the pass. */
+
+/** Read the connection's MetaApi state (masked token, security verdict, activation). */
+export async function fetchMetaApiStatus(connectionId: string): Promise<MetaApiStatus | null> {
+  const { data } = await fn<MetaApiStatus>('broker-mt', {
+    body: { action: 'metaapi-status', connection_id: connectionId },
+    fallback: 'Could not check the MetaApi bridge.',
+  })
+  return data
+}
+
+/** Save the user's own MetaApi token, validate it live and run the security pass. */
+export async function saveMetaApiToken(connectionId: string, token: string): Promise<{ data: MetaApiStatus | null; error: string | null }> {
+  return fn<MetaApiStatus>('broker-mt', {
+    body: { action: 'metaapi-save', connection_id: connectionId, token },
+    fallback: 'Could not save your MetaApi token.',
+  })
+}
+
+/** Re-run the security pass with the connection's current token. */
+export async function checkMetaApi(connectionId: string): Promise<{ data: MetaApiStatus | null; error: string | null }> {
+  return fn<MetaApiStatus>('broker-mt', {
+    body: { action: 'metaapi-check', connection_id: connectionId },
+    fallback: 'Could not check your MetaApi token.',
+  })
+}
+
+/** Activate live trading through MetaApi (requires the security pass to pass). */
+export async function activateMetaApi(connectionId: string): Promise<{ data: MetaApiStatus | null; error: string | null }> {
+  return fn<MetaApiStatus>('broker-mt', {
+    body: { action: 'metaapi-activate', connection_id: connectionId },
+    fallback: 'Could not activate the MetaTrader bridge.',
+  })
+}
+
+/** Remove the user's saved MetaApi token (disables the per-user bridge). */
+export async function removeMetaApiToken(connectionId: string): Promise<{ data: MetaApiStatus | null; error: string | null }> {
+  return fn<MetaApiStatus>('broker-mt', {
+    body: { action: 'metaapi-remove', connection_id: connectionId },
+    fallback: 'Could not remove your MetaApi token.',
   })
 }
 

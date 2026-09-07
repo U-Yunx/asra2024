@@ -319,6 +319,19 @@ export interface BrokerConnectionRow {
   last_verified_at: string | null
   created_at: string
   brokers?: BrokerRow | null
+  /** Masked preview of the user's own MetaApi token (never the raw token). */
+  metaapi_token_masked?: string | null
+  /** Last security-pass verdict for the connection's MetaApi token. */
+  metaapi_security?: MetaApiSecurityStatus | null
+  /** Human-readable reason from the last security pass. */
+  metaapi_security_note?: string | null
+  /** When the token was last checked against MetaApi. */
+  metaapi_token_checked_at?: string | null
+  /** Non-sensitive MetaApi user info (email, plan) from the last check. */
+  metaapi_meta?: Record<string, unknown> | null
+  /** True once the security pass passed AND the account was activated. */
+  metaapi_active?: boolean | null
+  metaapi_active_at?: string | null
 }
 
 /**
@@ -342,6 +355,39 @@ export interface BrokerTokenStatus {
   /** Masked preview (first 6 + last 4 chars) — never the raw token. */
   masked: string | null
   created_at: string | null
+}
+
+/** Verdict of the MetaApi security pass for a broker connection. */
+export type MetaApiSecurityStatus = 'none' | 'checking' | 'passed' | 'failed'
+
+/** Per-connection MetaApi state surfaced by the broker-mt bridge. */
+export interface MetaApiStatus {
+  ok?: boolean
+  /** True when the user saved their own MetaApi token (vs the platform secret). */
+  hasUserToken: boolean
+  /** Masked preview of the user's token (never the raw value). */
+  masked: string | null
+  /** Security-pass verdict; activation is gated on `passed`. */
+  security: MetaApiSecurityStatus
+  /** Human-readable reason from the last security pass. */
+  securityNote: string | null
+  /** When the token was last checked. */
+  checkedAt: string | null
+  /** True once activated (security passed + account provisioned/deployed). */
+  active: boolean
+  activeAt: string | null
+  /** Non-sensitive MetaApi user info from the last check. */
+  meta: { email?: string; name?: string; plan?: string; subscriptionType?: string; region?: string } | null
+  /** Which token is being used: the user's own, or the platform secret. */
+  tokenSource?: 'user' | 'platform' | null
+  /** Whether the platform-wide METAAPI_TOKEN secret is configured. */
+  platformTokenConfigured: boolean
+  /** Best-effort: is the connected MT account present under this token? */
+  accountFound?: boolean | null
+  /** MetaApi deployment state of the matched account. */
+  state?: string | null
+  connectionStatus?: string | null
+  error?: string
 }
 
 export interface SettingsRow {

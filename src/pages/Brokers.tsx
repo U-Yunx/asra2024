@@ -10,7 +10,10 @@ import {
   Loader2,
   Lock,
   PlugZap,
+  Plus,
   RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
   Trash2,
   TriangleAlert,
   UserRound,
@@ -18,15 +21,20 @@ import {
 import { useAuth } from '../hooks/useAuth'
 import { useBrokers, useProfile } from '../hooks/usePlatform'
 import {
+  activateMetaApi,
+  checkMetaApi,
   fetchBrokerTokenStatus,
+  fetchMetaApiStatus,
   generateBrokerToken,
   provisionMarketDataFromBroker,
   removeConnection,
+  removeMetaApiToken,
   revokeBrokerToken,
   saveConnection,
+  saveMetaApiToken,
 } from '../lib/platform'
 import { fn } from '../lib/functions'
-import type { BrokerConnectionRow, BrokerPlatform, BrokerRow, BrokerTokenStatus } from '../lib/types'
+import type { BrokerConnectionRow, BrokerPlatform, BrokerRow, BrokerTokenStatus, MetaApiStatus } from '../lib/types'
 import { cn } from '../lib/cn'
 import { formatDateTime } from '../lib/format'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, PageHeader, Select, Skeleton } from '../components/ui'
@@ -139,6 +147,222 @@ function MtConnectionStatus({ connectionId }: { connectionId: string }) {
       <CircleDot className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
       {status.message}
     </span>
+  )
+}
+
+/* ----------------------------- MetaApi (MT bridge) ---------------------------- */
+
+const METAAPI_SECURITY_STYLES: Record<MetaApiStatus['security'], string> = {
+  none: 'border-border bg-muted text-muted-foreground',
+  checking: 'border-amber/40 bg-amber/10 text-amber',
+  passed: 'border-up/40 bg-up/10 text-up',
+  failed: 'border-destructive/40 bg-destructive/10 text-red-200',
+}
+
+const METAAPI_SECURITY_LABEL: Record<MetaApiStatus['security'], string> = {
+  none: 'Not checked',
+  checking: 'Checking\u2026',
+  passed: 'Security passed',
+  failed: 'Security failed',
+}
+
+/**
+ * Per-connection MetaApi management: add your own FREE MetaApi token
+ * (metaapi.cloud), which is validated live against MetaApi's provisioning API
+ * (the "security pass"), then activate live trading — the bridge auto-generates
+ * the MetaApi account and deploys it ("auto-generate & inject from the free
+ * provider"). Without a user token the platform-wide METAAPI_TOKEN secret is
+ * used. Only a masked preview of the token ever reaches the browser.
+ */
+function MetaApiPanel({ connectionId }: { connectionId: string }) {
+  const [status, setStatus] = useState<MetaApiStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<'save' | 'check' | 'activate' | 'remove' | null>(null)
+  const [token, setToken] = useState('')
+  const [showForm, setShowForm] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    setStatus(await fetchMetaApiStatus(connectionId))
+    setLoading(false)
+  }, [connectionId])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!token.trim()) {
+      setError('Paste your MetaApi API token first — you get one free at metaapi.cloud.')
+      return
+    }
+    setBusy('save')
+    setError(null)
+    const { data, error: err } = await saveMetaApiToken(connectionId, token.trim())
+    setBusy(null)
+    if (err) {
+      setError(err)
+      return
+    }
+    if (data) setStatus(data)
+    setToken('')
+    setShowForm(false)
+  }
+
+  const check = async () => {
+    setBusy('check')
+    setError(null)
+    const { data, error: err } = await checkMetaApi(connectionId)
+    setBusy(null)
+    if (err) {
+      setError(err)
+      return
+    }
+    if (data) setStatus(data)
+  }
+
+  const activate = async () => {
+    setBusy('activate')
+    setError(null)
+    const { data, error: err } = await activateMetaApi(connectionId)
+    setBusy(null)
+    if (err) {
+      setError(err)
+      return
+    }
+    if (data) setStatus(data)
+  }
+
+  const remove = async () => {
+    setBusy('remove')
+    setError(null)
+    const { data, error: err } = await removeMetaApiToken(connectionId)
+    setBusy(null)
+    if (err) {
+      setError(err)
+      return
+    }
+    if (data) setStatus(data)
+  }
+
+  const s = status
+  const security = s?.security ?? 'none'
+
+  return (
+    <div className="mt-2 border-t border-up/20 pt-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <p className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+          <CloudUpload className="h-3.5 w-3.5 text-accent" aria-hidden="true" />
+          MetaApi (MT cloud bridge)
+        </p>
+        {loading ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" aria-hidden="true" />
+        ) : (
+          <div className="flex items-center gap-1.5">
+            {s?.active && (
+              <Badge className="border-up/40 bg-up/10 text-up">
+                <ShieldCheck className="h-3 w-3" aria-hidden="true" />
+                Live active
+              </Badge>
+            )}
+            <Badge className={METAAPI_SECURITY_STYLES[security]}>
+              {security === 'passed' ? (
+                <ShieldCheck className="h-3 w-3" aria-hidden="true" />
+              ) : security === 'failed' ? (
+                <ShieldAlert className="h-3 w-3" aria-hidden="true" />
+              ) : null}
+              {METAAPI_SECURITY_LABEL[security]}
+            </Badge>
+          </div>
+        )}
+      </div>
+
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        MetaTrader has no public API, so ANA24 connects your MT account through MetaApi&apos;s cloud. Add your own{' '}
+        <span className="text-foreground">free MetaApi token</span> to validate &amp; activate live trading right away; otherwise the
+        platform&apos;s shared bridge is used when available.
+      </p>
+
+      {s?.hasUserToken && (
+        <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
+          <KeyRound className="h-3 w-3" aria-hidden="true" />
+          Your token: <code className="rounded bg-muted px-1 py-0.5 font-mono">{s.masked ?? '\u2026\u2026\u2026\u2026'}</code>
+          {s.checkedAt && <span>· checked {formatDateTime(s.checkedAt)}</span>}
+          {s.meta?.email && <span>· {s.meta.email}</span>}
+          {s.meta?.plan && <span>· {s.meta.plan}</span>}
+        </p>
+      )}
+
+      {s?.securityNote && security !== 'none' && (
+        <p className={cn('mt-1 text-[11px]', security === 'passed' ? 'text-emerald-200' : 'text-red-300')}>{s.securityNote}</p>
+      )}
+
+      {!s?.hasUserToken && !loading && (
+        <div className="mt-2">
+          {showForm ? (
+            <form onSubmit={save} className="grid gap-2">
+              <Input
+                type="password"
+                autoComplete="off"
+                placeholder="Paste your MetaApi API token (metaapi.cloud)"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" variant="primary" size="sm" loading={busy === 'save'} disabled={busy !== null}>
+                  <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+                  Save &amp; check
+                </Button>
+                <Button type="button" variant="secondary" size="sm" onClick={() => setShowForm(false)} disabled={busy !== null}>
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <Button variant="secondary" size="sm" onClick={() => setShowForm(true)} disabled={busy !== null}>
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              Add your free MetaApi token
+            </Button>
+          )}
+        </div>
+      )}
+
+      {s?.hasUserToken && !loading && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button variant="secondary" size="sm" loading={busy === 'check'} disabled={busy !== null} onClick={() => void check()}>
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+            Re-check security
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            loading={busy === 'activate'}
+            disabled={busy !== null || security !== 'passed'}
+            onClick={() => void activate()}
+            title={security !== 'passed' ? 'Run the security check first — it must pass before live trading can activate.' : undefined}
+          >
+            <CloudUpload className="h-3.5 w-3.5" aria-hidden="true" />
+            {s.active ? 'Re-activate live trading' : 'Activate live trading'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={busy === 'remove'}
+            disabled={busy !== null}
+            onClick={() => void remove()}
+            className="text-red-300 hover:text-red-200"
+          >
+            <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+            Remove token
+          </Button>
+        </div>
+      )}
+
+      {error && <p className="mt-1 text-[11px] text-red-300">{error}</p>}
+    </div>
   )
 }
 
@@ -700,6 +924,7 @@ export function Brokers() {
                             <MtConnectionStatus connectionId={conn.id} />
                           </div>
                         )}
+                        {(conn.platform === 'mt4' || conn.platform === 'mt5') && <MetaApiPanel connectionId={conn.id} />}
                         <RestApiTokenPanel connectionId={conn.id} />
                         {conn.platform === 'oanda' && <OandaMarketDataPanel />}
                       </div>
