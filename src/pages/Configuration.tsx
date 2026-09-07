@@ -16,6 +16,7 @@ import type { TradeMode } from '../lib/trading/types'
 import { STRATEGY_META, STRATEGY_TYPES } from '../lib/strategies'
 import { cn } from '../lib/cn'
 import { Badge, Button, Card, CardContent, CardHeader, CardTitle, Input, PageHeader, Select } from '../components/ui'
+import { ApiTokensCard } from '../components/ApiTokensCard'
 
 export function Configuration() {
   const {
@@ -55,6 +56,8 @@ export function Configuration() {
       />
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <ApiTokensCard />
+
         <MarketDataCard />
 
         <Card>
