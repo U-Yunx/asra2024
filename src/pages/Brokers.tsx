@@ -68,49 +68,112 @@ type MtStatus =
   | { kind: 'checking' }
   | { kind: 'ready' }
   | { kind: 'not-provisioned' }
+  | { kind: 'deploying' }
   | { kind: 'error'; message: string }
 
 /**
  * Live-trading readiness for a connected MetaTrader account, surfaced on the
- * broker card. Verifies against the MetaApi bridge (broker-mt) and lets the
- * user provision the account right from the card if it isn't activated yet.
+ * broker card. AUTO-CONNECT & AUTO-FIX: on mount it verifies against the
+ * MetaApi bridge (broker-mt); if the account isn't in the MetaApi cloud yet it
+ * provisions + deploys it automatically (the bridge "create + deploy" step is
+ * the only way to reach an MT account — MetaTrader has no public REST API),
+ * then polls deployment state until the account is connected. If anything
+ * transient fails, a "Retry (auto-fix)" button re-runs the whole pipeline.
  * `connectionId` pins the call to THIS connection so several MT4/5 brokers can
  * sit side by side without their status checks colliding on one shared slot.
  */
 function MtConnectionStatus({ connectionId }: { connectionId: string }) {
   const [status, setStatus] = useState<MtStatus>({ kind: 'checking' })
   const [busy, setBusy] = useState(false)
+  const pollRef = useRef<number | null>(null)
 
-  const check = useCallback(async () => {
+  const clearPoll = useCallback(() => {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }, [])
+
+  /** Verify against the bridge. Returns the outcome so callers can chain. */
+  const check = useCallback(async (): Promise<{ provisioned: boolean; error: string | null }> => {
     setStatus({ kind: 'checking' })
     const { data, error } = await fn<{ ok?: boolean; provisioned?: boolean }>(
       'broker-mt',
       { body: { action: 'verify', connection_id: connectionId }, fallback: 'Could not reach the MetaTrader bridge.' },
     )
     if (!data?.ok) {
-      setStatus({ kind: 'error', message: error ?? 'Could not reach the MetaTrader bridge.' })
-      return
+      const message = error ?? 'Could not reach the MetaTrader bridge.'
+      setStatus({ kind: 'error', message })
+      return { provisioned: false, error: message }
     }
-    setStatus(data.provisioned ? { kind: 'ready' } : { kind: 'not-provisioned' })
+    if (data.provisioned) {
+      setStatus({ kind: 'ready' })
+      return { provisioned: true, error: null }
+    }
+    setStatus({ kind: 'not-provisioned' })
+    return { provisioned: false, error: null }
   }, [connectionId])
 
-  useEffect(() => {
-    void check()
-  }, [check])
+  /** Poll the MetaApi deployment state until the account connects (~3 min cap). */
+  const pollUntilConnected = useCallback(() => {
+    clearPoll()
+    let ticks = 0
+    pollRef.current = window.setInterval(async () => {
+      ticks += 1
+      const { data, error } = await fn<{ ok?: boolean; connectedToBroker?: boolean }>(
+        'broker-mt',
+        { body: { action: 'state', connection_id: connectionId } },
+      )
+      if (error) {
+        setStatus({ kind: 'error', message: error })
+        clearPoll()
+        return
+      }
+      if (data?.ok && data.connectedToBroker) {
+        setStatus({ kind: 'ready' })
+        clearPoll()
+        return
+      }
+      if (ticks >= 18) {
+        setStatus({ kind: 'error', message: 'Your account is still deploying after a few minutes — try again shortly.' })
+        clearPoll()
+        return
+      }
+      setStatus({ kind: 'deploying' })
+    }, 10_000)
+  }, [connectionId, clearPoll])
 
-  const activate = async () => {
+  /** Provision (create + deploy) the account in MetaApi, then poll until live. */
+  const connect = useCallback(async () => {
+    clearPoll()
     setBusy(true)
-    const { error } = await fn<{ ok?: boolean }>(
+    setStatus({ kind: 'deploying' })
+    const { data, error } = await fn<{ ok?: boolean }>(
       'broker-mt',
-      { body: { action: 'provision', connection_id: connectionId }, fallback: 'Could not provision this account.' },
+      { body: { action: 'provision', connection_id: connectionId }, fallback: 'Could not connect this account.' },
     )
     setBusy(false)
-    if (error) {
-      setStatus({ kind: 'error', message: error })
+    if (!data?.ok) {
+      setStatus({ kind: 'error', message: error ?? 'Could not connect this account.' })
       return
     }
-    await check()
-  }
+    setStatus({ kind: 'deploying' })
+    pollUntilConnected()
+  }, [connectionId, clearPoll, pollUntilConnected])
+
+  // AUTO-CONNECT: verify on mount; when the account isn't in the MetaApi cloud
+  // and the bridge is reachable, provision + deploy right away instead of
+  // leaving the user stuck on a "not activated" card.
+  const bootRef = useRef(false)
+  useEffect(() => {
+    if (bootRef.current) return
+    bootRef.current = true
+    void (async () => {
+      const res = await check()
+      if (!res.error && !res.provisioned) await connect()
+    })()
+    return () => clearPoll()
+  }, [check, connect, clearPoll])
 
   if (status.kind === 'checking') {
     return (
@@ -128,6 +191,14 @@ function MtConnectionStatus({ connectionId }: { connectionId: string }) {
       </span>
     )
   }
+  if (status.kind === 'deploying') {
+    return (
+      <span className="flex items-center gap-1.5 text-xs font-medium text-amber">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+        Connecting to MetaTrader — deploying on the cloud (takes about a minute)…
+      </span>
+    )
+  }
   if (status.kind === 'not-provisioned') {
     return (
       <div className="flex flex-wrap items-center gap-2">
@@ -135,18 +206,24 @@ function MtConnectionStatus({ connectionId }: { connectionId: string }) {
           <TriangleAlert className="h-3.5 w-3.5" aria-hidden="true" />
           Live trading not activated
         </span>
-        <Button variant="secondary" size="sm" onClick={() => void activate()} loading={busy}>
+        <Button variant="secondary" size="sm" onClick={() => void connect()} loading={busy}>
           <CloudUpload className="h-3.5 w-3.5" aria-hidden="true" />
-          Activate live trading
+          Connect now
         </Button>
       </div>
     )
   }
   return (
-    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <CircleDot className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-      {status.message}
-    </span>
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="flex items-center gap-1.5 text-xs text-red-300">
+        <CircleDot className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        {status.message}
+      </span>
+      <Button variant="secondary" size="sm" onClick={() => void connect()} loading={busy}>
+        <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+        Retry (auto-fix)
+      </Button>
+    </div>
   )
 }
 

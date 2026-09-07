@@ -234,6 +234,15 @@ function friendlyBridgeError(err: string | null, fallback: string): string {
   if (/no .* connection saved|connect your broker|add your/i.test(err)) {
     return 'Connect your broker on the Brokers page first.'
   }
+  if (/account_deploying|deploying on the metaapi cloud|connecting for the first time/i.test(err)) {
+    return 'Connecting to your MetaTrader account (first-time setup takes about a minute) — the app reconnects automatically.'
+  }
+  if (/no metaapi token|no general metaapi token/i.test(err)) {
+    return 'Add your free MetaApi token on the Brokers page to enable live trading (or ask an admin to set the platform token).'
+  }
+  if (/provision_failed|provision this account/i.test(err)) {
+    return `MetaTrader could not be provisioned in the MetaApi cloud. ${err}`
+  }
   return err
 }
 

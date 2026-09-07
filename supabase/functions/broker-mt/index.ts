@@ -388,6 +388,143 @@ function findMetaApiAccount(
     : null;
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * In-flight provisioning lock. The Trading page fires `summary`, `open-trades`
+ * and `closed-trades` in the same refresh tick, and several robot cycles can
+ * overlap; without a lock a first-time account would be created in MetaApi
+ * once per parallel call (five creates for one account). The lock makes every
+ * waiter share the SAME provisioning promise, so exactly one MetaApi
+ * create/deploy happens per connection; the others just await the result.
+ */
+const provisionLocks = new Map<
+  string,
+  Promise<{ ok: boolean; state: string | null; accountId: string | null; error: string | null }>
+>();
+
+/**
+ * AUTO-CONNECT / AUTO-FIX engine: make sure `login@server` exists in MetaApi
+ * and is deployed, creating it first if needed (same payload the old explicit
+ * "provision" action used — cloud account + deploy on the provisioning host).
+ *
+ * Returns:
+ *   { ok: true,  state: "DEPLOYED" }                    -> ready to trade
+ *   { ok: true,  state: "DEPLOYING" | "UNDEPLOYED" ...} -> give it a moment,
+ *                                                          callers return the
+ *                                                          "deploying" code so
+ *                                                          clients auto-poll.
+ *   { ok: false, error }                                -> MetaApi's own reason
+ *                                                          (server unsupported,
+ *                                                          quota, …) surfaced
+ *                                                          verbatim.
+ *
+ * Runs once per connection at a time (in-flight dedupe), and polls a freshly
+ * deployed account briefly so the first trading attempt usually lands.
+ */
+async function ensureMetaAccountDeployed(args: {
+  metaHeaders: Record<string, string>;
+  apiToken: string;
+  conn: MtConnection;
+  login: string;
+  server: string;
+  platform: "mt4" | "mt5";
+  password: string;
+  provisioningProfileId?: string;
+  magic?: number;
+}): Promise<{ ok: boolean; state: string | null; accountId: string | null; error: string | null }> {
+  const { metaHeaders, apiToken, conn, login, server, platform, password } = args;
+  const lockKey = conn.id;
+  const inFlight = provisionLocks.get(lockKey);
+  if (inFlight) return inFlight;
+
+  const task = (async () => {
+    const list = await fetchAccountsFor(apiToken);
+    if (!list.ok) {
+      return { ok: false, state: null, accountId: null, error: list.error ?? "MetaApi could not list the accounts for this token." };
+    }
+    let meta = findMetaApiAccount(list.list, login, server, platform);
+
+    if (!meta) {
+      // Not in the cloud yet -> create it ("auto-generate & inject from the free
+      // provider"). Only real account credentials are sent; the inputs mirror the
+      // explicit `provision` / `metaapi-activate` payloads exactly.
+      const accountPayload: Record<string, unknown> = {
+        name: `Forex Toolkit ${platform.toUpperCase()} ${login}`,
+        type: conn.account_type === "live" ? "live" : "demo",
+        login,
+        password: String(password),
+        server,
+        platform,
+        magic: toNumber(args.magic) || 0,
+      };
+      if (args.provisioningProfileId) accountPayload.provisioningProfileId = args.provisioningProfileId;
+      const createRes = await fetchWithTimeout(`${METAAPI_PROVISIONING_BASE}/users/current/accounts`, {
+        method: "POST",
+        headers: metaHeaders,
+        body: JSON.stringify(accountPayload),
+      }, 20_000);
+      const created = await createRes.json().catch(() => ({})) as { id?: string; error?: string; message?: string };
+      if (!createRes.ok || !created.id) {
+        return {
+          ok: false,
+          state: null,
+          accountId: null,
+          error: created.error ?? created.message ?? `MetaApi could not provision this account (HTTP ${createRes.status}).`,
+        };
+      }
+      meta = { id: String(created.id), state: "UNDEFINED", connectionStatus: "", name: "", type: "" };
+    }
+
+    if (meta.state !== "DEPLOYED" && meta.state !== "DEPLOYING") {
+      const deployRes = await fetchWithTimeout(`${METAAPI_PROVISIONING_BASE}/users/current/accounts/${meta.id}/deploy`, {
+        method: "POST",
+        headers: metaHeaders,
+      }, 20_000);
+      const deploy = await deployRes.json().catch(() => ({})) as { error?: string; message?: string };
+      if (!deployRes.ok) {
+        const msg = deploy.error ?? deploy.message ?? `MetaApi could not deploy this account (HTTP ${deployRes.status}).`;
+        // "already deploying / already deployed" race is not a failure.
+        if (/already deployed|in the process of deployment|deploying/i.test(msg)) {
+          return { ok: true, state: meta.state === "DEPLOYING" ? meta.state : "DEPLOYING", accountId: meta.id, error: null };
+        }
+        return { ok: false, state: null, accountId: meta.id, error: msg };
+      }
+      meta = { ...meta, state: "DEPLOYING" };
+    }
+
+    // A fresh deployment takes ~20-60s to be reachable. Poll briefly (bounded,
+    // best-effort) so the calling action usually succeeds on the first attempt
+    // instead of bouncing through the "deploying" code a few times.
+    let state = meta.state ?? "";
+    const HEAD = /^DEPLOYED$/;
+    if (!HEAD.test(state)) {
+      for (let i = 0; i < 4; i++) {
+        await sleep(3000);
+        try {
+          const stRes = await fetchWithTimeout(`${METAAPI_PROVISIONING_BASE}/users/current/accounts/${meta.id}`, {
+            headers: metaHeaders,
+          });
+          const stData = (await stRes.json().catch(() => ({}))) as { state?: string };
+          state = String(stData.state ?? "");
+        } catch {
+          /* keep polling */
+        }
+        if (HEAD.test(state)) break;
+      }
+    }
+
+    return { ok: true, state: HEAD.test(state) ? "DEPLOYED" : "DEPLOYING", accountId: meta.id, error: null };
+  })();
+
+  provisionLocks.set(lockKey, task);
+  try {
+    return await task;
+  } finally {
+    if (provisionLocks.get(lockKey) === task) provisionLocks.delete(lockKey);
+  }
+}
+
 /** Shape of the loaded broker_connections row (credentials + MetaApi state). */
 interface MtConnection {
   id: string;
@@ -668,6 +805,7 @@ Deno.serve(async (req: Request) => {
   if (!metaApiToken && !tokenFreeAction) {
     return json({
       ok: false,
+      code: "no_metaapi_token",
       error: tokenMode === "general"
         ? "No general MetaApi token is configured. An admin needs to set the METAAPI_TOKEN secret before live trading can work."
         : "No MetaApi token available for live trading. Add your own free MetaApi token on the Brokers page (or ask the admin to set the METAAPI_TOKEN secret).",
@@ -902,51 +1040,22 @@ Deno.serve(async (req: Request) => {
         return json({ ok: true, note: "MetaApi security pass complete — account already deployed and live trading is active." });
       }
 
-      // Provisioning profile id (optional — MetaApi infers it from the server).
-      const provisioningProfileId = String(body.provisioningProfileId ?? "").trim();
-      const accountPayload: Record<string, unknown> = {
-        name: `Forex Toolkit ${platform.toUpperCase()} ${login}`,
-        type: conn.account_type === "live" ? "live" : "demo",
+      // Provision through the AUTO-CONNECT engine (same code path the first
+      // live-trading attempt uses, with in-flight dedupe so parallel clicks
+      // create the account exactly once).
+      const provisioned = await ensureMetaAccountDeployed({
+        metaHeaders,
+        apiToken: metaApiToken,
+        conn,
         login,
-        password: String(password),
         server,
         platform,
-        magic: toNumber(body.magic) || 0,
-      };
-      if (provisioningProfileId) accountPayload.provisioningProfileId = provisioningProfileId;
-
-      // Auto-generate & inject: create the account in MetaApi under this token
-      // ("free MetaApi provider"), then deploy it to their cloud.
-      if (!pass.accountFound) {
-        const createRes = await fetchWithTimeout(`${METAAPI_PROVISIONING_BASE}/users/current/accounts`, {
-          method: "POST",
-          headers: metaHeaders,
-          body: JSON.stringify(accountPayload),
-        }, 20_000);
-        const created = await createRes.json() as { id?: string; error?: string; message?: string };
-        if (!createRes.ok || !created.id) {
-          return json({ ok: false, error: created.error ?? created.message ?? "MetaApi could not provision this account." }, 400);
-        }
-      }
-
-      // Re-list to learn the account id when we just created it.
-      const accounts = await fetchAccountsFor(metaApiToken);
-      if (!accounts.ok) {
-        return json({ ok: false, error: accounts.error ?? "MetaApi could not confirm the account after provisioning." }, 502);
-      }
-      const meta = findMetaApiAccount(accounts.list, login, server, platform);
-      if (!meta) {
-        return json({ ok: false, error: "MetaApi provisioned the account but it is not visible yet. Try activating again in a minute." }, 502);
-      }
-      if (meta.state !== "DEPLOYED") {
-        const deployRes2 = await fetchWithTimeout(`${METAAPI_PROVISIONING_BASE}/users/current/accounts/${meta.id}/deploy`, {
-          method: "POST",
-          headers: metaHeaders,
-        }, 20_000);
-        const deploy = await deployRes2.json().catch(() => ({})) as { error?: string; message?: string };
-        if (!deployRes2.ok) {
-          return json({ ok: false, error: deploy.error ?? deploy.message ?? "Provisioned but failed to deploy." }, 502);
-        }
+        password: String(password ?? ""),
+        provisioningProfileId: String(body.provisioningProfileId ?? "").trim() || undefined,
+        magic: toNumber(body.magic),
+      });
+      if (!provisioned.ok) {
+        return json({ ok: false, code: "provision_failed", error: provisioned.error ?? "MetaApi could not provision this account." }, 400);
       }
 
       const now = new Date().toISOString();
@@ -961,7 +1070,11 @@ Deno.serve(async (req: Request) => {
       if (saveErr.error) return json({ ok: false, error: `Could not save the activation state: ${saveErr.error}` }, 500);
       return json({
         ok: true,
-        note: "MetaApi security pass complete — account provisioned and deploying on the free MetaApi cloud. Live trading activates in about a minute.",
+        code: provisioned.state === "DEPLOYED" ? "deployed" : "deploying",
+        state: provisioned.state,
+        note: provisioned.state === "DEPLOYED"
+          ? "MetaApi security pass complete — account deployed and live trading is active."
+          : "MetaApi security pass complete — account provisioned and deploying on the free MetaApi cloud. Live trading activates in about a minute.",
       });
     }
 
@@ -987,60 +1100,76 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "provision") {
-      // Create the MT account in MetaApi, then deploy it to their cloud.
-      // A provisioningProfileId is optional — if omitted MetaApi creates an
-      // implicit provisioning profile from the server address.
-      const provisioningProfileId = String(body.provisioningProfileId ?? "").trim();
-      const accountPayload: Record<string, unknown> = {
-        name: `Forex Toolkit ${platform.toUpperCase()} ${login}`,
-        type: conn.account_type === "live" ? "live" : "demo",
+      // Create the MT account in MetaApi, then deploy it to their cloud
+      // (same AUTO-CONNECT engine the first live-trading attempt uses, so
+      // manual and automatic provisioning always agree).
+      const provisioned = await ensureMetaAccountDeployed({
+        metaHeaders,
+        apiToken: metaApiToken,
+        conn,
         login,
-        password: String(password),
         server,
         platform,
-        magic: toNumber(body.magic) || 0,
-      };
-      if (provisioningProfileId) accountPayload.provisioningProfileId = provisioningProfileId;
-
-      // Account creation + deployment are served by the provisioning API host
-      // (same host that lists accounts) — keep them off the trading host.
-      const createRes = await fetchWithTimeout(`${METAAPI_PROVISIONING_BASE}/users/current/accounts`, {
-        method: "POST",
-        headers: metaHeaders,
-        body: JSON.stringify(accountPayload),
-      }, 20_000);
-      const created = await createRes.json() as { id?: string; error?: string; message?: string };
-      if (!createRes.ok || !created.id) {
-        return json({ ok: false, error: created.error ?? created.message ?? "MetaApi could not provision this account." }, 400);
-      }
-      const accountId = created.id;
-
-      const deployRes = await fetchWithTimeout(`${METAAPI_PROVISIONING_BASE}/users/current/accounts/${accountId}/deploy`, {
-        method: "POST",
-        headers: metaHeaders,
-      }, 20_000);
-      const deploy = await deployRes.json().catch(() => ({})) as { error?: string; message?: string };
-      if (!deployRes.ok) {
-        return json({ ok: false, error: deploy.error ?? deploy.message ?? "Provisioned but failed to deploy." }, 502);
+        password: String(password ?? ""),
+        provisioningProfileId: String(body.provisioningProfileId ?? "").trim() || undefined,
+        magic: toNumber(body.magic),
+      });
+      if (!provisioned.ok) {
+        return json({ ok: false, code: "provision_failed", error: provisioned.error ?? "MetaApi could not provision this account." }, 400);
       }
       return json({
         ok: true,
-        metaapiAccountId: accountId,
-        note: "Account provisioned and deploying. Deployment takes about a minute — call `state` or `summary` shortly.",
+        metaapiAccountId: provisioned.accountId,
+        code: provisioned.state === "DEPLOYED" ? "deployed" : "deploying",
+        state: provisioned.state,
+        note: provisioned.state === "DEPLOYED"
+          ? "Account provisioned and deployed — ready to trade live."
+          : "Account provisioned and deploying. Deployment takes about a minute — the app reconnects automatically.",
       });
     }
 
     // Every action below needs the provisioned + deployed MetaApi account.
-    const accountsFor = await fetchAccountsFor(metaApiToken);
+    let accountsFor = await fetchAccountsFor(metaApiToken);
     if (!accountsFor.ok) {
       return json({ ok: false, error: accountsFor.error ?? "Could not reach MetaApi. Check the network and try again." }, 502);
     }
-    const meta = findMetaApiAccount(accountsFor.list, login, server, platform);
+    let meta = findMetaApiAccount(accountsFor.list, login, server, platform);
     if (!meta) {
-      return json({
-        ok: false,
-        error: "This MT account isn't linked to MetaApi yet. Run the connect flow once (provision action) to deploy it to the MetaApi cloud.",
-      }, 400);
+      // AUTO-CONNECT / AUTO-FIX: the account isn't in the MetaApi cloud yet.
+      // MetaTrader has no public REST API, so this bridge "create + deploy"
+      // step is the ONLY way to reach the account — running it on demand means
+      // "save your MT credentials and the app connects" with no manual
+      // activation step. In-flight dedupe keeps concurrent refresh calls from
+      // racing multiple creates for the same connection.
+      console.info(`broker-mt: auto-connecting ${platform} account #${login} on ${server} for user ${user.id.slice(0, 8)}`);
+      const provisioned = await ensureMetaAccountDeployed({
+        metaHeaders,
+        apiToken: metaApiToken,
+        conn,
+        login,
+        server,
+        platform,
+        password: String(password ?? ""),
+      });
+      if (!provisioned.ok) {
+        return json({ ok: false, code: "provision_failed", error: provisioned.error ?? "MetaApi could not provision this account." }, 400);
+      }
+      if (provisioned.state !== "DEPLOYED") {
+        return json({
+          ok: false,
+          code: "account_deploying",
+          state: provisioned.state,
+          error: "MetaTrader account is connecting for the first time (deploying on the MetaApi cloud). The app reconnects automatically in a few seconds.",
+        }, 503);
+      }
+      accountsFor = await fetchAccountsFor(metaApiToken);
+      if (!accountsFor.ok) {
+        return json({ ok: false, error: accountsFor.error ?? "Could not reach MetaApi. Check the network and try again." }, 502);
+      }
+      meta = findMetaApiAccount(accountsFor.list, login, server, platform);
+      if (!meta) {
+        return json({ ok: false, code: "provision_failed", error: "MetaApi provisioned the account but it is not visible yet. The app retries automatically." }, 502);
+      }
     }
 
     const accountUrl = `${METAAPI_BASE}/users/current/accounts/${meta.id}`;
